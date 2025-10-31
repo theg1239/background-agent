@@ -148,9 +148,7 @@ export function ChatInterface({ initialTasks }: ChatInterfaceProps) {
     <div className="relative mx-auto flex h-full w-full max-w-3xl flex-1 flex-col gap-5 px-4 pb-10">
       <header className="flex items-center justify-between pt-6">
         <div className="space-y-1">
-          <span className="text-[11px] uppercase tracking-[0.4em] text-neutral-500">Background Agent</span>
-          <h1 className="text-2xl font-semibold text-white">Get progress updates without waiting around</h1>
-          <p className="text-sm text-neutral-400">Create a task and check back later—the agent keeps working and streams every milestone live.</p>
+          <h1 className="text-2xl font-semibold text-white">i tried to implement a bg agent</h1>
         </div>
         <button
           type="button"
