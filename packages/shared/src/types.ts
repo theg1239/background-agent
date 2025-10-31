@@ -79,7 +79,8 @@ export type WorkerCommand = z.infer<typeof WorkerCommandSchema>;
 
 export const TaskEventStreamSnapshotSchema = z.object({
   task: TaskSchema,
-  events: z.array(TaskEventSchema)
+  events: z.array(TaskEventSchema),
+  cursor: z.string().optional()
 });
 export type TaskEventStreamSnapshot = z.infer<
   typeof TaskEventStreamSnapshotSchema

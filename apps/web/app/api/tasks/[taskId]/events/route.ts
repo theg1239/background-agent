@@ -15,19 +15,40 @@ export async function GET(
   }
 
   const stream = new ReadableStream<Uint8Array>({
-    start(controller) {
+    async start(controller) {
       controller.enqueue(serializeSSE({ event: "snapshot", data: snapshot }));
 
-      const unsubscribe = taskStore.subscribe(taskId, (event) => {
-        controller.enqueue(serializeSSE({ event: event.type, data: event }));
-      });
+      let cursor = snapshot.cursor ?? (await taskStore.getLatestStreamCursor(taskId)) ?? "0-0";
+      let active = true;
 
       const abort = () => {
-        unsubscribe();
+        active = false;
         controller.close();
       };
 
       request.signal.addEventListener("abort", abort);
+
+      while (active) {
+        try {
+          const result = await taskStore.readEventsFromStream(taskId, cursor, {
+            blockMs: 5_000,
+            count: 50
+          });
+
+          if (!result) {
+            continue;
+          }
+
+          for (const event of result.events) {
+            controller.enqueue(serializeSSE({ event: event.type, data: event }));
+          }
+
+          cursor = result.cursor;
+        } catch (error) {
+          console.error("Event stream error", error);
+          await new Promise((resolve) => setTimeout(resolve, 1_000));
+        }
+      }
     }
   });
 

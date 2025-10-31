@@ -22,8 +22,9 @@ An end-to-end prototype of a background coding agent platform. The Next.js front
 Create `.env.local` (never commit secrets):
 
 ```bash
-TASK_API_TOKEN="local-dev-token"   # Optional; set to enforce auth for internal routes
-REDIS_URL="redis://localhost:6379" # Shared Redis instance for queue + task store
+TASK_API_TOKEN="local-dev-token"        # Optional; set to enforce auth for internal routes
+UPSTASH_REDIS_REST_URL="https://..."    # Upstash Redis REST URL
+UPSTASH_REDIS_REST_TOKEN="..."          # Upstash Redis REST token
 ```
 
 When deploying to Vercel, set `TASK_API_TOKEN` in the project settings so internal API endpoints require bearer auth from workers.
@@ -48,9 +49,6 @@ PERSIST_WORKSPACES=false               # set true to keep workspaces for debuggi
 ```bash
 pnpm install
 
-# Start Redis (Docker example)
-docker run --rm -p 6379:6379 redis:7
-
 # Start the Next.js app
 yarn --cwd apps/web dev      # or `pnpm --filter web dev`
 
@@ -72,6 +70,7 @@ The worker polls `/api/internal/worker/tasks` to claim tasks, executes an agent 
 
 - **Frontend**: Deploy `apps/web` on Vercel. Expose the internal API routes (`/api/internal/...`) and secure them via `TASK_API_TOKEN`.
 - **Worker**: Build a Node.js 20+ runtime on EC2 (or any container runner). Use `pnpm --filter @background-agent/worker build` and run `node dist/index.js`. PM2 or systemd is recommended for restarts.
+- **Redis**: Provision Upstash Redis and supply the REST credentials to both the Vercel project and the worker via environment variables.
 - **Scaling**: Swap the in-memory queue for durable infrastructure (Redis Streams, Postgres advisory locks, etc.) before production. Update `task-queue.ts` + worker dispatcher accordingly.
 - **Observability**: Pipe worker logs to CloudWatch/Loki, and add metrics (queue depth, task duration) for alerting.
 

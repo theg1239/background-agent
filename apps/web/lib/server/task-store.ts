@@ -1,4 +1,3 @@
-import { EventEmitter } from "node:events";
 import {
   CreateTaskInput,
   Task,
@@ -15,16 +14,15 @@ const encoder = new TextEncoder();
 const TASK_INDEX_KEY = "tasks:index";
 const TASK_KEY_PREFIX = "tasks:item:";
 const TASK_EVENTS_KEY_PREFIX = "tasks:events:";
+const TASK_EVENTS_STREAM_PREFIX = "tasks:events_stream:";
 
 interface TaskRecord extends Task {
   input: CreateTaskInput;
+  latestStreamId?: string;
 }
-
-type TaskEventListener = (event: TaskEvent) => void;
 
 class TaskRepository {
   private redis = getRedis();
-  private eventEmitter = new EventEmitter();
 
   private taskKey(taskId: string) {
     return `${TASK_KEY_PREFIX}${taskId}`;
@@ -34,8 +32,12 @@ class TaskRepository {
     return `${TASK_EVENTS_KEY_PREFIX}${taskId}`;
   }
 
+  private eventsStreamKey(taskId: string) {
+    return `${TASK_EVENTS_STREAM_PREFIX}${taskId}`;
+  }
+
   private sanitize(record: TaskRecord): Task {
-    const { input: _input, ...task } = record;
+    const { input: _input, latestStreamId: _latestStreamId, ...task } = record;
     return task;
   }
 
@@ -54,13 +56,9 @@ class TaskRepository {
     const ids = await this.redis.smembers(TASK_INDEX_KEY);
     if (ids.length === 0) return [];
 
-    const pipeline = this.redis.multi();
-    ids.forEach((id) => pipeline.get(this.taskKey(id)));
-    const results = await pipeline.exec();
-
     const tasks: Task[] = [];
-    results?.forEach((result) => {
-      const value = result?.[1] as string | null;
+    const records = await Promise.all(ids.map((id) => this.redis.get(this.taskKey(id))));
+    records.forEach((value) => {
       if (!value) return;
       try {
         const record = JSON.parse(value) as TaskRecord;
@@ -102,7 +100,8 @@ class TaskRepository {
       latestEventId: undefined,
       assignee: undefined,
       riskScore: 0.2,
-      input
+      input,
+      latestStreamId: undefined
     };
 
     const creationEvent: TaskEvent = {
@@ -116,11 +115,10 @@ class TaskRepository {
       }
     };
 
-    await this.redis
-      .multi()
-      .sadd(TASK_INDEX_KEY, id)
-      .set(this.taskKey(id), JSON.stringify(task))
-      .exec();
+    const pipeline = this.redis.pipeline();
+    pipeline.sadd(TASK_INDEX_KEY, id);
+    pipeline.set(this.taskKey(id), JSON.stringify(task));
+    await pipeline.exec();
 
     await this.appendEvent(id, creationEvent);
 
@@ -176,13 +174,19 @@ class TaskRepository {
   }
 
   private async persistEvent(record: TaskRecord, event: TaskEvent) {
-    await this.redis
-      .multi()
-      .set(this.taskKey(record.id), JSON.stringify(record))
-      .rpush(this.eventsKey(record.id), JSON.stringify(event))
-      .exec();
+    const streamId = await this.redis.xadd(
+      this.eventsStreamKey(record.id),
+      "*",
+      { event: JSON.stringify(event) },
+      { trim: { strategy: "maxlen", threshold: 2000 } }
+    );
 
-    await this.emitEvent(record, event);
+    record.latestStreamId = streamId;
+
+    const pipeline = this.redis.pipeline();
+    pipeline.set(this.taskKey(record.id), JSON.stringify(record));
+    pipeline.rpush(this.eventsKey(record.id), JSON.stringify(event));
+    await pipeline.exec();
   }
 
   async getEventStreamSnapshot(taskId: string): Promise<TaskEventStreamSnapshot | undefined> {
@@ -203,23 +207,51 @@ class TaskRepository {
 
     return {
       task: this.sanitize(record),
-      events
+      events,
+      cursor: record.latestStreamId
     };
   }
 
-  subscribe(taskId: string, onEvent: TaskEventListener) {
-    const key = this.eventKey(taskId);
-    this.eventEmitter.on(key, onEvent);
-    return () => this.eventEmitter.off(key, onEvent);
+  async getLatestStreamCursor(taskId: string): Promise<string | undefined> {
+    const record = await this.getTaskRecord(taskId);
+    return record?.latestStreamId;
   }
 
-  private async emitEvent(record: TaskRecord, event: TaskEvent) {
-    const key = this.eventKey(record.id);
-    this.eventEmitter.emit(key, event);
-  }
+  async readEventsFromStream(
+    taskId: string,
+    lastSeenId: string,
+    { blockMs = 5_000, count = 20 }: { blockMs?: number; count?: number }
+  ): Promise<{ events: TaskEvent[]; cursor: string } | undefined> {
+    const responses = await this.redis.xread<TaskEvent>(
+      [{ key: this.eventsStreamKey(taskId), id: lastSeenId }],
+      { block: blockMs, count }
+    );
 
-  private eventKey(taskId: string) {
-    return `task:${taskId}`;
+    if (!responses || responses.length === 0) {
+      return undefined;
+    }
+
+    const [, entries] = responses[0];
+    let cursor = lastSeenId;
+    const events: TaskEvent[] = [];
+
+    for (const [id, fields] of entries) {
+      const payload = fields.event ?? fields.data;
+      if (typeof payload !== "string") continue;
+      try {
+        const event = JSON.parse(payload) as TaskEvent;
+        events.push(event);
+        cursor = id;
+      } catch (error) {
+        console.error("Failed to parse streamed event", { taskId, error });
+      }
+    }
+
+    if (events.length === 0) {
+      return undefined;
+    }
+
+    return { events, cursor };
   }
 }
 
