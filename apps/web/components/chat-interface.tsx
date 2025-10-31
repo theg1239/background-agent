@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useMemo, useRef, useState, useCallback, useTransition } from "react";
+import { FormEvent, useEffect, useMemo, useRef, useState, useCallback, useTransition } from "react";
 import { clsx } from "clsx";
 import type { Task, TaskEvent } from "@background-agent/shared";
 import { useTaskEvents } from "../hooks/use-task-events";
@@ -9,7 +9,7 @@ import { useTaskIndex } from "../hooks/use-task-index";
 import { DiffArtifactCard } from "./diff-artifact-card";
 import { LiveFileDiffViewer, type LiveFileUpdate } from "./live-file-diff-viewer";
 import type { GitHubAuthState } from "../lib/server/github-auth";
-import { recordFollowUpAction } from "../app/actions/task-actions";
+import { createTaskAction, recordFollowUpAction } from "../app/actions/task-actions";
 
 interface ChatInterfaceProps {
   initialTasks: Task[];
@@ -18,8 +18,11 @@ interface ChatInterfaceProps {
 
 type PaneView = "chat" | "workspace";
 
+const ACTIVE_TASK_STATUSES: Task["status"][] = ["queued", "planning", "executing", "awaiting_approval"];
+const ACTIVE_TASK_STATUS_SET = new Set<Task["status"]>(ACTIVE_TASK_STATUSES);
+
 export function ChatInterface({ initialTasks, initialGitHubAuth }: ChatInterfaceProps) {
-  const [activeTaskId, setActiveTaskId] = useState<string | undefined>(initialTasks[0]?.id);
+  const [activeTaskId, setActiveTaskId] = useState<string | undefined>(undefined);
   const [creationMessage, setCreationMessage] = useState<string | null>(null);
   const [isCreateOpen, setIsCreateOpen] = useState(false);
   const [showConversation, setShowConversation] = useState(false);
@@ -27,7 +30,13 @@ export function ChatInterface({ initialTasks, initialGitHubAuth }: ChatInterface
   const [followUpError, setFollowUpError] = useState<string | null>(null);
   const [followUpStatus, setFollowUpStatus] = useState<string | null>(null);
   const [focusedEventId, setFocusedEventId] = useState<string | undefined>(undefined);
+  const [hasActivatedFullUI, setHasActivatedFullUI] = useState(() =>
+    initialTasks.some((task) => ACTIVE_TASK_STATUS_SET.has(task.status))
+  );
+  const [quickTaskText, setQuickTaskText] = useState("");
+  const [quickTaskError, setQuickTaskError] = useState<string | null>(null);
   const [isFollowUpPending, startFollowUp] = useTransition();
+  const [isQuickTaskPending, startQuickTask] = useTransition();
   const { tasks, upsertTask, replaceTask, removeTask } = useTaskIndex(initialTasks);
   const optimisticIds = useRef(new Set<string>());
   const [githubAuth, setGitHubAuth] = useState<GitHubAuthState>(initialGitHubAuth);
@@ -36,13 +45,11 @@ export function ChatInterface({ initialTasks, initialGitHubAuth }: ChatInterface
   const activeTask = useMemo(() => tasks.find((task) => task.id === activeTaskId), [tasks, activeTaskId]);
 
   useEffect(() => {
-    if (tasks.length === 0) {
-      setActiveTaskId(undefined);
+    if (!activeTaskId) {
       return;
     }
-
-    if (activeTaskId && !tasks.some((taskItem) => taskItem.id === activeTaskId)) {
-      setActiveTaskId(tasks[0]?.id);
+    if (!tasks.some((taskItem) => taskItem.id === activeTaskId)) {
+      setActiveTaskId(undefined);
     }
   }, [tasks, activeTaskId]);
 
@@ -157,6 +164,12 @@ export function ChatInterface({ initialTasks, initialGitHubAuth }: ChatInterface
   const workingDuration = workingSince ? Math.max(0, nowTick - workingSince) : undefined;
   const workingLabel = useMemo(() => (workingDuration ? formatDuration(workingDuration) : null), [workingDuration]);
 
+    const orderedTasks = useMemo(() => {
+    return tasks
+      .filter((taskItem) => ACTIVE_TASK_STATUS_SET.has(taskItem.status))
+      .sort((a, b) => (b.updatedAt || b.createdAt) - (a.updatedAt || a.createdAt));
+  }, [tasks]);
+  
   const statusSummary = useMemo(() => {
     if (!resolvedTask) return "Idle";
     const statusText = humanizeStatus(resolvedTask.status);
@@ -184,15 +197,95 @@ export function ChatInterface({ initialTasks, initialGitHubAuth }: ChatInterface
     return () => window.removeEventListener("resize", syncPane);
   }, []);
 
+    const hasActiveTasks = orderedTasks.length > 0;
+
+  useEffect(() => {
+    if (hasActiveTasks) {
+      setHasActivatedFullUI(true);
+    }
+  }, [hasActiveTasks]);
+
+  
+
   const creationMessageClass = creationMessage?.startsWith("Failed") ? "text-red-400" : "text-emerald-400";
 
   const isOptimisticActive = Boolean(activeTaskId && activeTaskId.startsWith("temp-"));
   const connectionLabel = isOptimisticActive ? "Starting" : isConnected ? "Live" : "Queued";
   const connectionClass = isOptimisticActive
-    ? "bg-amber-500/10 text-amber-300 border-amber-400/40"
+    ? "border-amber-400/40 bg-amber-500/10 text-amber-300"
     : isConnected
-    ? "bg-emerald-500/10 text-emerald-300 border-emerald-400/40"
-    : "bg-amber-500/10 text-amber-300 border-amber-400/40";
+    ? "border-emerald-400/40 bg-emerald-500/10 text-emerald-300"
+    : "border-amber-400/40 bg-amber-500/10 text-amber-300";
+  const connectionDotClass = isOptimisticActive
+    ? "bg-amber-300"
+    : isConnected
+    ? "bg-emerald-400"
+    : "bg-amber-300 animate-pulse";
+  const showFullLayout = hasActivatedFullUI || hasActiveTasks;
+
+  
+  const handleQuickTaskSubmit = (event: FormEvent<HTMLFormElement>) => {
+    event.preventDefault();
+    if (isQuickTaskPending) {
+      return;
+    }
+    const rawText = quickTaskText.trim();
+    if (rawText.length < 3) {
+      setQuickTaskError("Describe what you want the agent to do (minimum 3 characters).");
+      return;
+    }
+
+    const hadActiveTasks = hasActiveTasks;
+    const now = Date.now();
+    const TITLE_LIMIT = 120;
+    let title = rawText;
+    if (title.length > TITLE_LIMIT) {
+      title = `${title.slice(0, TITLE_LIMIT - 3).trimEnd()}...`;
+    }
+
+    setQuickTaskError(null);
+
+    const optimisticId = `temp-${now}`;
+    const optimisticTask: Task = {
+      id: optimisticId,
+      title,
+      description: rawText,
+      repoUrl: undefined,
+      status: "queued",
+      plan: [],
+      createdAt: now,
+      updatedAt: now,
+      assignee: undefined,
+      latestEventId: undefined,
+      riskScore: 0.2
+    };
+
+    handleTaskCreated(optimisticTask, { optimisticId, isOptimistic: true });
+    setHasActivatedFullUI(true);
+
+    startQuickTask(async () => {
+      try {
+        const result = await createTaskAction({
+          title,
+          description: rawText
+        });
+        if (!result.ok || !result.task) {
+          const message = result.error ?? "Failed to create task";
+          setQuickTaskError(message);
+          handleTaskCreateFailed(optimisticId, message);
+          setHasActivatedFullUI(hadActiveTasks);
+          return;
+        }
+        handleTaskCreated(result.task, { optimisticId, isOptimistic: false });
+        setQuickTaskText("");
+      } catch (error) {
+        const message = (error as Error).message ?? "Failed to create task";
+        setQuickTaskError(message);
+        handleTaskCreateFailed(optimisticId, message);
+        setHasActivatedFullUI(hadActiveTasks);
+      }
+    });
+  };
 
   const openConversation = useCallback(
     (eventId?: string) => {
@@ -209,13 +302,6 @@ export function ChatInterface({ initialTasks, initialGitHubAuth }: ChatInterface
   const handleGitHubAuthChange = useCallback((state: GitHubAuthState) => {
     setGitHubAuth(state);
   }, []);
-
-  const orderedTasks = useMemo(() => {
-    const activeStatuses = new Set(["queued", "planning", "executing", "awaiting_approval"]);
-    return tasks
-      .filter((taskItem) => activeStatuses.has(taskItem.status))
-      .sort((a, b) => (b.updatedAt || b.createdAt) - (a.updatedAt || a.createdAt));
-  }, [tasks]);
 
   const latestDiffEvent = useMemo(() => {
     for (let index = events.length - 1; index >= 0; index -= 1) {
@@ -321,205 +407,259 @@ export function ChatInterface({ initialTasks, initialGitHubAuth }: ChatInterface
   );
 }
 
-  return (
-    <div className="flex min-h-0 flex-1 flex-col gap-4 overflow-hidden xl:flex-row xl:gap-6">
-      <section className="flex w-full flex-shrink-0 flex-col gap-4 rounded-3xl border border-neutral-900 bg-neutral-950/90 p-4 xl:w-64 xl:border-none xl:bg-transparent xl:p-0">
-        <div className="rounded-3xl border border-neutral-800 bg-neutral-950/90 px-4 py-3">
-          <div className="flex items-center justify-between text-xs text-neutral-400">
-            <span className="inline-flex items-center gap-2 rounded-full border border-emerald-500/40 bg-emerald-500/10 px-3 py-1 text-emerald-200">
-              <span className="h-2 w-2 rounded-full bg-emerald-400" />
-              {connectionLabel}
-            </span>
-            <button
-              type="button"
-              onClick={() => setIsCreateOpen(true)}
-              className="inline-flex items-center justify-center rounded-full border border-neutral-700 bg-white px-3 py-1 text-xs font-semibold text-black transition hover:bg-neutral-200 focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-neutral-400"
-            >
-              New task
-            </button>
-          </div>
-          <div className="mt-3 flex items-center justify-between text-[11px] uppercase tracking-[0.25em] text-neutral-500">
-            <span>Status</span>
-            <span>{statusSummary}</span>
-          </div>
-          <div className="mt-2 flex items-center justify-between text-xs text-neutral-500">
-            <span>GitHub</span>
-            <span>
-              {githubAuth.status === "connected" && githubAuth.user
-                ? githubAuth.user.login
-                : "Not linked"}
-            </span>
-          </div>
-        </div>
+  const containerClass = clsx(
+    "flex min-h-0 flex-1",
+    showFullLayout
+      ? "flex-col gap-4 overflow-hidden xl:flex-row xl:gap-6"
+      : "flex-col items-center justify-center px-6 py-10"
+  );
 
-        <div className="rounded-3xl border border-neutral-800 bg-neutral-950/90 px-4 py-4">
-          <div className="flex items-center justify-between text-[11px] uppercase tracking-[0.35em] text-neutral-500">
-            <span>Active</span>
-            <button
-              type="button"
-              onClick={() => openConversation()}
-              className="rounded-full border border-neutral-800 px-2 py-1 text-[10px] text-neutral-400 transition hover:border-neutral-600 hover:text-white"
-            >
-              Conversation
-            </button>
+  return (
+    <div className={containerClass}>
+      {showFullLayout ? (
+        <>
+          <section className="flex w-full flex-shrink-0 flex-col gap-4 rounded-3xl border border-neutral-900 bg-neutral-950/90 p-4 xl:w-64 xl:border-none xl:bg-transparent xl:p-0">
+            <div className="rounded-3xl border border-neutral-800 bg-neutral-950/90 px-4 py-3">
+              <div className="flex items-center justify-between text-xs text-neutral-400">
+                <span
+                  className={clsx(
+                    "inline-flex items-center gap-2 rounded-full border px-3 py-1 text-xs font-semibold transition",
+                    connectionClass
+                  )}
+                >
+                  <span className={clsx("h-2 w-2 rounded-full", connectionDotClass)} />
+                  {connectionLabel}
+                </span>
+                <button
+                  type="button"
+                  onClick={() => setIsCreateOpen(true)}
+                  className="inline-flex items-center justify-center rounded-full border border-neutral-700 bg-white px-3 py-1 text-xs font-semibold text-black transition hover:bg-neutral-200 focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-neutral-400"
+                >
+                  New task
+                </button>
+              </div>
+              <div className="mt-3 flex items-center justify-between text-[11px] uppercase tracking-[0.25em] text-neutral-500">
+                <span>Status</span>
+                <span>{statusSummary}</span>
+              </div>
+              <div className="mt-2 flex items-center justify-between text-xs text-neutral-500">
+                <span>GitHub</span>
+                <span>
+                  {githubAuth.status === "connected" && githubAuth.user
+                    ? githubAuth.user.login
+                    : "Not linked"}
+                </span>
+              </div>
+            </div>
+
+            <div className="rounded-3xl border border-neutral-800 bg-neutral-950/90 px-4 py-4">
+              <div className="flex items-center justify-between text-[11px] uppercase tracking-[0.35em] text-neutral-500">
+                <span>Active</span>
+                <button
+                  type="button"
+                  onClick={() => openConversation()}
+                  className="rounded-2xl border border-dashed border-neutral-700 px-4 py-2 text-[10px] text-neutral-500 transition hover:border-neutral-500 hover:text-white"
+                >
+                  Conversation
+                </button>
+              </div>
+              <div className="mt-3 space-y-2">
+                {orderedTasks.length === 0 ? (
+                  <button
+                    type="button"
+                    onClick={() => setIsCreateOpen(true)}
+                    className="w-full rounded-2xl border border-dashed border-neutral-700 px-4 py-6 text-center text-xs text-neutral-500 transition hover:border-neutral-500 hover:text-white"
+                  >
+                    No active tasks · Create one
+                  </button>
+                ) : (
+                  orderedTasks.map((taskItem) => {
+                    const isActive = taskItem.id === activeTaskId;
+                    return (
+                      <button
+                        key={taskItem.id}
+                        type="button"
+                        onClick={() => setActiveTaskId(taskItem.id)}
+                        className={clsx(
+                          "w-full rounded-2xl border px-4 py-3 text-left transition",
+                          isActive
+                            ? "border-emerald-400/50 bg-emerald-500/10 text-white"
+                            : "border-neutral-800 bg-neutral-950 text-neutral-300 hover:border-neutral-600 hover:text-white"
+                        )}
+                      >
+                        <p className="truncate text-sm font-semibold">{taskItem.title}</p>
+                        <p className="mt-1 text-[10px] uppercase tracking-[0.25em] text-neutral-500">
+                          {humanizeStatus(taskItem.status)}
+                        </p>
+                      </button>
+                    );
+                  })
+                )}
+                {creationMessage ? (
+                  <p className={clsx("text-xs", creationMessageClass)}>{creationMessage}</p>
+                ) : null}
+              </div>
+            </div>
+
+            {latestDiffEvent ? (
+              <div className="rounded-3xl border border-emerald-500/30 bg-emerald-500/5 px-4 py-4 text-sm text-neutral-200">
+                <div className="flex items-center justify-between text-[11px] uppercase tracking-[0.35em] text-emerald-200">
+                  <span>Latest diff</span>
+                  <span className="text-[10px] text-neutral-400">
+                    {new Date(latestDiffEvent.event.timestamp).toLocaleTimeString()}
+                  </span>
+                </div>
+                <p className="mt-2 text-xs text-neutral-200">
+                  Review the generated patch and create a pull request when you’re ready.
+                </p>
+                <div className="mt-3 flex flex-wrap gap-2">
+                  <button
+                    type="button"
+                    onClick={() => openConversation(latestDiffEvent.event.id)}
+                    className="inline-flex flex-1 items-center justify-center gap-2 rounded-full border border-emerald-500/50 bg-emerald-500/10 px-3 py-2 text-xs font-semibold text-emerald-100 transition hover:border-emerald-400 hover:text-white"
+                  >
+                    Review & Create PR
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => setMobilePane("workspace")}
+                    className="inline-flex items-center justify-center rounded-full border border-neutral-700 px-3 py-2 text-xs text-neutral-200 transition hover:border-neutral-500 hover:text-white"
+                  >
+                    View diff
+                  </button>
+                </div>
+              </div>
+            ) : null}
+
+            <div className="rounded-3xl border border-neutral-800 bg-neutral-950/90 px-4 py-4 text-xs text-neutral-400">
+              <div className="flex items-center justify-between">
+                <span className="text-[11px] uppercase tracking-[0.35em] text-neutral-500">
+                  Quick message
+                </span>
+                <button
+                  type="button"
+                  onClick={() => openConversation()}
+                  className="rounded-full border border-neutral-800 px-2 py-1 text-[10px] text-neutral-300 transition hover:border-neutral-600 hover:text-white"
+                >
+                  View log
+                </button>
+              </div>
+              <form
+                className="mt-3 space-y-2"
+                onSubmit={(event) => {
+                  event.preventDefault();
+                  if (!activeTaskId) {
+                    setFollowUpError("Select a task first.");
+                    return;
+                  }
+                  const trimmed = followUpText.trim();
+                  if (!trimmed) {
+                    setFollowUpError("Type a quick note before sending.");
+                    return;
+                  }
+                  setFollowUpError(null);
+                  startFollowUp(async () => {
+                    const result = await recordFollowUpAction({
+                      taskId: activeTaskId,
+                      message: trimmed
+                    });
+                    if (result.ok) {
+                      setFollowUpText("");
+                      setFollowUpStatus("Follow-up sent to the agent.");
+                    } else if (result.error) {
+                      setFollowUpError(result.error);
+                    } else {
+                      setFollowUpError("Failed to send follow-up. Try again.");
+                    }
+                  });
+                }}
+              >
+                <textarea
+                  rows={3}
+                  value={followUpText}
+                  onChange={(event) => setFollowUpText(event.target.value)}
+                  placeholder="Send a quick note or next step for the agent…"
+                  className="scrollbar w-full resize-none rounded-xl border border-neutral-800 bg-neutral-950 px-3 py-2 text-sm text-neutral-100 focus:border-neutral-600 focus:outline-none"
+                />
+                {followUpError ? <p className="text-xs text-red-400">{followUpError}</p> : null}
+                <div className="flex items-center justify-between">
+                  {followUpStatus ? (
+                    <span className="text-xs text-emerald-300">{followUpStatus}</span>
+                  ) : (
+                    <span />
+                  )}
+                  <button
+                    type="submit"
+                    disabled={isFollowUpPending}
+                    className="inline-flex items-center justify-center gap-2 rounded-full border border-neutral-700 px-4 py-2 text-xs font-semibold text-neutral-200 transition hover:border-neutral-500 hover:text-white disabled:cursor-not-allowed disabled:opacity-60"
+                  >
+                    {isFollowUpPending ? "Sending…" : "Send"}
+                  </button>
+                </div>
+              </form>
+            </div>
+          </section>
+
+          <div className="flex min-h-0 flex-1 overflow-hidden">
+            <div className="hidden min-h-0 flex-1 overflow-hidden rounded-3xl border border-neutral-800 bg-neutral-950/85 xl:flex">
+              <LiveFileDiffViewer
+                updates={liveFileUpdates}
+                className="flex-1"
+                onReviewDiff={latestDiffEvent ? () => openConversation(latestDiffEvent.event.id) : undefined}
+              />
+            </div>
+            <div className="flex min-h-0 flex-1 overflow-hidden xl:hidden">
+              {mobilePane === "workspace" ? (
+                <LiveFileDiffViewer
+                  updates={liveFileUpdates}
+                  className="flex-1"
+                  onReviewDiff={latestDiffEvent ? () => openConversation(latestDiffEvent.event.id) : undefined}
+                />
+              ) : (
+                <ConversationPanel highlightEventId={focusedEventId} />
+              )}
+            </div>
           </div>
-          <div className="mt-3 space-y-2">
-            {orderedTasks.length === 0 ? (
+        </>
+      ) : (
+        <div className="w-full max-w-2xl space-y-4">
+          <form
+            onSubmit={handleQuickTaskSubmit}
+            className="rounded-3xl border border-neutral-800 bg-neutral-950/70 p-6 shadow-xl backdrop-blur"
+          >
+            <textarea
+              rows={4}
+              value={quickTaskText}
+              onChange={(event) => setQuickTaskText(event.target.value)}
+              placeholder="Code anything in the background..."
+              className="scrollbar w-full resize-none rounded-2xl border border-neutral-800 bg-neutral-950 px-4 py-3 text-base text-neutral-100 placeholder:text-neutral-600 focus:border-neutral-600 focus:outline-none"
+            />
+            {quickTaskError ? (
+              <p className="mt-2 text-sm text-red-400">{quickTaskError}</p>
+            ) : (
+              <p className="mt-2 text-sm text-neutral-500">
+                Tell the agent what to build; it will work asynchronously and stream updates here.
+              </p>
+            )}
+            <div className="mt-4 flex flex-col-reverse gap-3 sm:flex-row sm:items-center sm:justify-between">
               <button
                 type="button"
                 onClick={() => setIsCreateOpen(true)}
-                className="w-full rounded-2xl border border-dashed border-neutral-700 px-4 py-6 text-center text-xs text-neutral-500 transition hover:border-neutral-500 hover:text-white"
+                className="text-xs text-neutral-500 underline decoration-dotted underline-offset-4 transition hover:text-white"
               >
-                No active tasks · Create one
+                Use advanced task form
               </button>
-            ) : (
-              orderedTasks.map((taskItem) => {
-                const isActive = taskItem.id === activeTaskId;
-                return (
-                  <button
-                    key={taskItem.id}
-                    type="button"
-                    onClick={() => setActiveTaskId(taskItem.id)}
-                    className={clsx(
-                      "w-full rounded-2xl border px-4 py-3 text-left transition",
-                      isActive
-                        ? "border-emerald-400/50 bg-emerald-500/10 text-white"
-                        : "border-neutral-800 bg-neutral-950 text-neutral-300 hover:border-neutral-600 hover:text-white"
-                    )}
-                  >
-                    <p className="truncate text-sm font-semibold">{taskItem.title}</p>
-                    <p className="mt-1 text-[10px] uppercase tracking-[0.25em] text-neutral-500">
-                      {humanizeStatus(taskItem.status)}
-                    </p>
-                  </button>
-                );
-              })
-            )}
-            {creationMessage ? (
-              <p className={clsx("text-xs", creationMessageClass)}>{creationMessage}</p>
-            ) : null}
-          </div>
-        </div>
-
-        {latestDiffEvent ? (
-          <div className="rounded-3xl border border-emerald-500/30 bg-emerald-500/5 px-4 py-4 text-sm text-neutral-200">
-            <div className="flex items-center justify-between text-[11px] uppercase tracking-[0.35em] text-emerald-200">
-              <span>Latest diff</span>
-              <span className="text-[10px] text-neutral-400">
-                {new Date(latestDiffEvent.event.timestamp).toLocaleTimeString()}
-              </span>
-            </div>
-            <p className="mt-2 text-xs text-neutral-200">
-              Review the generated patch and create a pull request when you’re ready.
-            </p>
-            <div className="mt-3 flex flex-wrap gap-2">
-              <button
-                type="button"
-                onClick={() => openConversation(latestDiffEvent.event.id)}
-                className="inline-flex flex-1 items-center justify-center gap-2 rounded-full border border-emerald-500/50 bg-emerald-500/10 px-3 py-2 text-xs font-semibold text-emerald-100 transition hover:border-emerald-400 hover:text-white"
-              >
-                Review & Create PR
-              </button>
-              <button
-                type="button"
-                onClick={() => setMobilePane("workspace")}
-                className="inline-flex items-center justify-center rounded-full border border-neutral-700 px-3 py-2 text-xs text-neutral-200 transition hover:border-neutral-500 hover:text-white"
-              >
-                View diff
-              </button>
-            </div>
-          </div>
-        ) : null}
-
-        <div className="rounded-3xl border border-neutral-800 bg-neutral-950/90 px-4 py-4 text-xs text-neutral-400">
-          <div className="flex items-center justify-between">
-            <span className="text-[11px] uppercase tracking-[0.35em] text-neutral-500">
-              Quick message
-            </span>
-            <button
-              type="button"
-              onClick={() => openConversation()}
-              className="rounded-full border border-neutral-800 px-2 py-1 text-[10px] text-neutral-300 transition hover:border-neutral-600 hover:text-white"
-            >
-              View log
-            </button>
-          </div>
-          <form
-            className="mt-3 space-y-2"
-            onSubmit={(event) => {
-              event.preventDefault();
-              if (!activeTaskId) {
-                setFollowUpError("Select a task first.");
-                return;
-              }
-              const trimmed = followUpText.trim();
-              if (!trimmed) {
-                setFollowUpError("Type a quick note before sending.");
-                return;
-              }
-              setFollowUpError(null);
-              startFollowUp(async () => {
-                const result = await recordFollowUpAction({
-                  taskId: activeTaskId,
-                  message: trimmed
-                });
-                if (result.ok) {
-                  setFollowUpText("");
-                  setFollowUpStatus("Follow-up sent to the agent.");
-                } else if (result.error) {
-                  setFollowUpError(result.error);
-                } else {
-                  setFollowUpError("Failed to send follow-up. Try again.");
-                }
-              });
-            }}
-          >
-            <textarea
-              rows={3}
-              value={followUpText}
-              onChange={(event) => setFollowUpText(event.target.value)}
-              placeholder="Send a quick note or next step for the agent…"
-              className="scrollbar w-full resize-none rounded-xl border border-neutral-800 bg-neutral-950 px-3 py-2 text-sm text-neutral-100 focus:border-neutral-600 focus:outline-none"
-            />
-            {followUpError ? <p className="text-xs text-red-400">{followUpError}</p> : null}
-            <div className="flex items-center justify-between">
-              {followUpStatus ? (
-                <span className="text-xs text-emerald-300">{followUpStatus}</span>
-              ) : (
-                <span />
-              )}
               <button
                 type="submit"
-                disabled={isFollowUpPending}
-                className="inline-flex items-center justify-center gap-2 rounded-full border border-neutral-700 px-4 py-2 text-xs font-semibold text-neutral-200 transition hover:border-neutral-500 hover:text-white disabled:cursor-not-allowed disabled:opacity-60"
+                disabled={isQuickTaskPending}
+                className="inline-flex items-center justify-center rounded-full bg-white px-5 py-2 text-sm font-semibold text-black transition hover:bg-neutral-200 disabled:cursor-not-allowed disabled:bg-neutral-800 disabled:text-neutral-400"
               >
-                {isFollowUpPending ? "Sending…" : "Send"}
+                {isQuickTaskPending ? "Starting…" : "Run in background"}
               </button>
             </div>
           </form>
         </div>
-      </section>
-
-      <div className="flex min-h-0 flex-1 overflow-hidden">
-        <div className="hidden min-h-0 flex-1 overflow-hidden rounded-3xl border border-neutral-800 bg-neutral-950/85 xl:flex">
-          <LiveFileDiffViewer
-            updates={liveFileUpdates}
-            className="flex-1"
-            onReviewDiff={latestDiffEvent ? () => openConversation(latestDiffEvent.event.id) : undefined}
-          />
-        </div>
-        <div className="flex min-h-0 flex-1 overflow-hidden xl:hidden">
-          {mobilePane === "workspace" ? (
-            <LiveFileDiffViewer
-              updates={liveFileUpdates}
-              className="flex-1"
-              onReviewDiff={latestDiffEvent ? () => openConversation(latestDiffEvent.event.id) : undefined}
-            />
-          ) : (
-            <ConversationPanel highlightEventId={focusedEventId} />
-          )}
-        </div>
-      </div>
+      )}
 
       {showConversation ? (
         <div className="fixed inset-0 z-50 hidden items-center justify-center px-6 py-10 xl:flex">
