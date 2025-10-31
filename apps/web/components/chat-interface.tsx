@@ -268,7 +268,7 @@ export function ChatInterface({ initialTasks, initialGitHubAuth }: ChatInterface
     if (!resolvedTask) return "Idle";
     const statusText = humanizeStatus(resolvedTask.status);
     if (workingLabel) {
-      return `${statusText} • working`;
+      return `${statusText} • working for ${workingLabel}`;
     }
     return statusText;
   }, [resolvedTask, workingLabel]);
