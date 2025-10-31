@@ -21,6 +21,49 @@ type PaneView = "chat" | "workspace";
 const ACTIVE_TASK_STATUSES: Task["status"][] = ["queued", "planning", "executing", "awaiting_approval"];
 const ACTIVE_TASK_STATUS_SET = new Set<Task["status"]>(ACTIVE_TASK_STATUSES);
 
+function stripGitSuffix(value: string) {
+  return value.endsWith(".git") ? value.slice(0, -4) : value;
+}
+
+function normalizeGitHubRepoInput(raw: string | undefined | null): string | undefined {
+  if (!raw) return undefined;
+  const cleaned = raw.trim().replace(/^[<>"'`(]+/, "").replace(/[<>"'`),.;]+$/, "");
+  if (!cleaned) return undefined;
+
+  const httpsMatch = cleaned.match(/^https?:\/\/github\.com\/([A-Za-z0-9_.-]+)\/([A-Za-z0-9_.-]+)(?:\.git)?(?:\/.*)?$/i);
+  if (httpsMatch) {
+    return `https://github.com/${httpsMatch[1]}/${stripGitSuffix(httpsMatch[2])}`;
+  }
+
+  const sshMatch = cleaned.match(/^git@github\.com:([A-Za-z0-9_.-]+)\/([A-Za-z0-9_.-]+)(?:\.git)?$/i);
+  if (sshMatch) {
+    return `https://github.com/${sshMatch[1]}/${stripGitSuffix(sshMatch[2])}`;
+  }
+
+  const ownerRepoMatch = cleaned.match(/^([A-Za-z0-9_.-]+)\/([A-Za-z0-9_.-]+)$/);
+  if (ownerRepoMatch) {
+    return `https://github.com/${ownerRepoMatch[1]}/${stripGitSuffix(ownerRepoMatch[2])}`;
+  }
+
+  return undefined;
+}
+
+function extractGitHubRepoFromText(text: string): string | undefined {
+  const httpsMatch = text.match(/https?:\/\/github\.com\/[^\s]+/i);
+  if (httpsMatch) {
+    const normalized = normalizeGitHubRepoInput(httpsMatch[0]);
+    if (normalized) return normalized;
+  }
+
+  const sshMatch = text.match(/git@github\.com:[^\s]+/i);
+  if (sshMatch) {
+    const normalized = normalizeGitHubRepoInput(sshMatch[0]);
+    if (normalized) return normalized;
+  }
+
+  return undefined;
+}
+
 export function ChatInterface({ initialTasks, initialGitHubAuth }: ChatInterfaceProps) {
   const [activeTaskId, setActiveTaskId] = useState<string | undefined>(undefined);
   const [creationMessage, setCreationMessage] = useState<string | null>(null);
@@ -35,6 +78,8 @@ export function ChatInterface({ initialTasks, initialGitHubAuth }: ChatInterface
   );
   const [quickTaskText, setQuickTaskText] = useState("");
   const [quickTaskError, setQuickTaskError] = useState<string | null>(null);
+  const [quickRepo, setQuickRepo] = useState("");
+  const [showQuickRepoField, setShowQuickRepoField] = useState(false);
   const [isFollowUpPending, startFollowUp] = useTransition();
   const [isQuickTaskPending, startQuickTask] = useTransition();
   const { tasks, upsertTask, replaceTask, removeTask } = useTaskIndex(initialTasks);
@@ -243,6 +288,25 @@ export function ChatInterface({ initialTasks, initialGitHubAuth }: ChatInterface
       title = `${title.slice(0, TITLE_LIMIT - 3).trimEnd()}...`;
     }
 
+    const trimmedRepoInput = quickRepo.trim();
+    const userProvidedRepo = normalizeGitHubRepoInput(trimmedRepoInput);
+    if (trimmedRepoInput && !userProvidedRepo) {
+      setQuickTaskError("Enter a valid GitHub repository URL (for example, https://github.com/acme/project).");
+      setShowQuickRepoField(true);
+      return;
+    }
+
+    const inferredRepo = userProvidedRepo ?? extractGitHubRepoFromText(rawText);
+    if (!inferredRepo) {
+      setQuickTaskError("Add a GitHub repository URL so the agent knows where to work.");
+      setShowQuickRepoField(true);
+      return;
+    }
+
+    if (trimmedRepoInput) {
+      setQuickRepo(inferredRepo);
+    }
+    setShowQuickRepoField(Boolean(trimmedRepoInput));
     setQuickTaskError(null);
 
     const optimisticId = `temp-${now}`;
@@ -250,7 +314,7 @@ export function ChatInterface({ initialTasks, initialGitHubAuth }: ChatInterface
       id: optimisticId,
       title,
       description: rawText,
-      repoUrl: undefined,
+      repoUrl: inferredRepo,
       status: "queued",
       plan: [],
       createdAt: now,
@@ -267,7 +331,8 @@ export function ChatInterface({ initialTasks, initialGitHubAuth }: ChatInterface
       try {
         const result = await createTaskAction({
           title,
-          description: rawText
+          description: rawText,
+          repoUrl: inferredRepo
         });
         if (!result.ok || !result.task) {
           const message = result.error ?? "Failed to create task";
@@ -278,6 +343,8 @@ export function ChatInterface({ initialTasks, initialGitHubAuth }: ChatInterface
         }
         handleTaskCreated(result.task, { optimisticId, isOptimistic: false });
         setQuickTaskText("");
+        setQuickRepo("");
+        setShowQuickRepoField(false);
       } catch (error) {
         const message = (error as Error).message ?? "Failed to create task";
         setQuickTaskError(message);
@@ -453,12 +520,12 @@ export function ChatInterface({ initialTasks, initialGitHubAuth }: ChatInterface
             </div>
 
             <div className="rounded-3xl border border-neutral-800 bg-neutral-950/90 px-4 py-4">
-              <div className="flex items-center justify-between text-[11px] uppercase tracking-[0.35em] text-neutral-500">
+              <div className="flex flex-wrap items-center justify-between gap-2 text-[11px] uppercase tracking-[0.35em] text-neutral-500">
                 <span>Active</span>
                 <button
                   type="button"
                   onClick={() => openConversation()}
-                  className="rounded-2xl border border-dashed border-neutral-700 px-4 py-2 text-[10px] text-neutral-500 transition hover:border-neutral-500 hover:text-white"
+                  className="w-full rounded-2xl border border-dashed border-neutral-700 px-4 py-2 text-center text-[10px] text-neutral-500 transition hover:border-neutral-500 hover:text-white sm:w-auto"
                 >
                   Conversation
                 </button>
@@ -532,14 +599,14 @@ export function ChatInterface({ initialTasks, initialGitHubAuth }: ChatInterface
             ) : null}
 
             <div className="rounded-3xl border border-neutral-800 bg-neutral-950/90 px-4 py-4 text-xs text-neutral-400">
-              <div className="flex items-center justify-between">
+              <div className="flex flex-wrap items-center justify-between gap-2">
                 <span className="text-[11px] uppercase tracking-[0.35em] text-neutral-500">
                   Quick message
                 </span>
                 <button
                   type="button"
                   onClick={() => openConversation()}
-                  className="rounded-full border border-neutral-800 px-2 py-1 text-[10px] text-neutral-300 transition hover:border-neutral-600 hover:text-white"
+                  className="w-full rounded-2xl border border-dashed border-neutral-700 px-4 py-2 text-center text-[10px] text-neutral-500 transition hover:border-neutral-500 hover:text-white sm:w-auto"
                 >
                   View log
                 </button>
@@ -634,6 +701,30 @@ export function ChatInterface({ initialTasks, initialGitHubAuth }: ChatInterface
               placeholder="Code anything in the background..."
               className="scrollbar w-full resize-none rounded-2xl border border-neutral-800 bg-neutral-950 px-4 py-3 text-base text-neutral-100 placeholder:text-neutral-600 focus:border-neutral-600 focus:outline-none"
             />
+            {showQuickRepoField ? (
+              <div className="mt-3 space-y-1">
+                <label className="text-xs uppercase tracking-[0.25em] text-neutral-500">
+                  GitHub repository
+                </label>
+                <input
+                  type="text"
+                  value={quickRepo}
+                  onChange={(event) => setQuickRepo(event.target.value)}
+                  placeholder="https://github.com/acme/project"
+                  className="w-full rounded-2xl border border-neutral-800 bg-neutral-950 px-4 py-2 text-sm text-neutral-100 placeholder:text-neutral-600 focus:border-neutral-600 focus:outline-none"
+                />
+              </div>
+            ) : (
+              <div className="mt-3">
+                <button
+                  type="button"
+                  onClick={() => setShowQuickRepoField(true)}
+                  className="text-xs text-neutral-500 underline decoration-dotted underline-offset-4 transition hover:text-white"
+                >
+                  Add GitHub repository manually
+                </button>
+              </div>
+            )}
             {quickTaskError ? (
               <p className="mt-2 text-sm text-red-400">{quickTaskError}</p>
             ) : (
