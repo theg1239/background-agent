@@ -1,19 +1,22 @@
-import { NextResponse } from "next/server";
+import { NextRequest, NextResponse } from "next/server";
 import { taskStore } from "../../../../../lib/server/task-store";
 import { getSessionId } from "../../../../../lib/server/session";
 
 export const dynamic = "force-dynamic";
 
 export async function GET(
-  _request: Request,
-  context: { params: { taskId?: string | string[] } }
+  request: NextRequest,
+  { params }: { params: { taskId?: string | string[] } }
 ) {
   await getSessionId();
 
-  const rawTaskId = context.params?.taskId;
-  const taskId = Array.isArray(rawTaskId) ? rawTaskId[0] : rawTaskId;
+  const rawTaskId = params?.taskId;
+  const candidate = Array.isArray(rawTaskId) ? rawTaskId[0] : rawTaskId;
+  const taskIdFromParams = typeof candidate === "string" ? candidate.trim() : undefined;
 
-  if (!taskId || typeof taskId !== "string" || !taskId.trim()) {
+  const taskId = taskIdFromParams ?? request.nextUrl.pathname.split("/")[3]?.trim();
+
+  if (!taskId) {
     return NextResponse.json(
       { error: "Invalid task identifier." },
       { status: 400 }
