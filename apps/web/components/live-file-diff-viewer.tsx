@@ -38,6 +38,7 @@ export type LiveFileUpdate = {
 type Props = {
   updates: LiveFileUpdate[];
   className?: string;
+  onReviewDiff?: () => void;
 };
 
 type TreeNode =
@@ -57,7 +58,7 @@ type TreeNode =
       deletions: number;
     };
 
-export function LiveFileDiffViewer({ updates, className }: Props) {
+export function LiveFileDiffViewer({ updates, className, onReviewDiff }: Props) {
   const updatesByPath = useMemo(() => {
     const map = new Map<string, LiveFileUpdate[]>();
     for (const update of updates) {
@@ -253,6 +254,15 @@ export function LiveFileDiffViewer({ updates, className }: Props) {
           >
             Files
           </button>
+          {onReviewDiff ? (
+            <button
+              type="button"
+              onClick={onReviewDiff}
+              className="rounded-full border border-emerald-500/50 bg-emerald-500/10 px-3 py-1 text-emerald-200 transition hover:border-emerald-400 hover:text-white"
+            >
+              Review &amp; Create PR
+            </button>
+          ) : null}
           <button
             type="button"
             onClick={() => setFollowLatest(true)}

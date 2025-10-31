@@ -25,6 +25,8 @@ export function ChatInterface({ initialTasks, initialGitHubAuth }: ChatInterface
   const [showConversation, setShowConversation] = useState(false);
   const [followUpText, setFollowUpText] = useState("");
   const [followUpError, setFollowUpError] = useState<string | null>(null);
+  const [followUpStatus, setFollowUpStatus] = useState<string | null>(null);
+  const [focusedEventId, setFocusedEventId] = useState<string | undefined>(undefined);
   const [isFollowUpPending, startFollowUp] = useTransition();
   const { tasks, upsertTask, replaceTask, removeTask } = useTaskIndex(initialTasks);
   const optimisticIds = useRef(new Set<string>());
@@ -192,13 +194,17 @@ export function ChatInterface({ initialTasks, initialGitHubAuth }: ChatInterface
     ? "bg-emerald-500/10 text-emerald-300 border-emerald-400/40"
     : "bg-amber-500/10 text-amber-300 border-amber-400/40";
 
-  const openConversation = useCallback(() => {
-    if (typeof window !== "undefined" && window.innerWidth < 1280) {
-      setMobilePane("chat");
-      return;
-    }
-    setShowConversation(true);
-  }, []);
+  const openConversation = useCallback(
+    (eventId?: string) => {
+      setFocusedEventId(eventId);
+      if (typeof window !== "undefined" && window.innerWidth < 1280) {
+        setMobilePane("chat");
+      } else {
+        setShowConversation(true);
+      }
+    },
+    []
+  );
 
   const handleGitHubAuthChange = useCallback((state: GitHubAuthState) => {
     setGitHubAuth(state);
@@ -211,13 +217,57 @@ export function ChatInterface({ initialTasks, initialGitHubAuth }: ChatInterface
       .sort((a, b) => (b.updatedAt || b.createdAt) - (a.updatedAt || a.createdAt));
   }, [tasks]);
 
-  const ConversationPanel = () => (
-    <div className="flex h-full min-h-0 flex-1 flex-col overflow-hidden rounded-3xl border border-neutral-800 bg-neutral-950/85">
-      <div className="flex flex-shrink-0 items-center justify-between border-b border-neutral-800 px-5 py-4">
-        <div className="min-w-0">
-          <p className="text-[11px] uppercase tracking-[0.3em] text-neutral-500">Conversation</p>
-          <p className="truncate text-lg font-semibold text-white">
-            {resolvedTask ? resolvedTask.title : "Select or create a task"}
+  const latestDiffEvent = useMemo(() => {
+    for (let index = events.length - 1; index >= 0; index -= 1) {
+      const event = events[index];
+      if (event.type === "task.artifact_generated") {
+        const diff = typeof event.payload?.diff === "string" ? event.payload.diff : undefined;
+        if (diff && diff.trim()) {
+          return { event, diff } as const;
+        }
+      }
+    }
+    return undefined;
+  }, [events]);
+
+  useEffect(() => {
+    if (!focusedEventId) return;
+    const timeout = setTimeout(() => setFocusedEventId(undefined), 2_000);
+    return () => clearTimeout(timeout);
+  }, [focusedEventId]);
+
+  useEffect(() => {
+    if (!followUpStatus) return;
+    const timeout = setTimeout(() => setFollowUpStatus(null), 3_000);
+    return () => clearTimeout(timeout);
+  }, [followUpStatus]);
+
+  const ConversationPanel = ({ highlightEventId }: { highlightEventId?: string }) => {
+    const highlightRef = useRef<HTMLDivElement | null>(null);
+
+    useEffect(() => {
+      if (!highlightEventId) {
+        highlightRef.current = null;
+        return;
+      }
+      if (highlightRef.current) {
+        highlightRef.current.scrollIntoView({ behavior: "smooth", block: "center" });
+      }
+    }, [highlightEventId, events.length]);
+
+    const assignHighlightRef = useCallback((node: HTMLDivElement | null) => {
+      if (node) {
+        highlightRef.current = node;
+      }
+    }, []);
+
+    return (
+      <div className="flex h-full min-h-0 flex-1 flex-col overflow-hidden rounded-3xl border border-neutral-800 bg-neutral-950/85">
+        <div className="flex flex-shrink-0 items-center justify-between border-b border-neutral-800 px-5 py-4">
+          <div className="min-w-0">
+            <p className="text-[11px] uppercase tracking-[0.3em] text-neutral-500">Conversation</p>
+            <p className="truncate text-lg font-semibold text-white">
+              {resolvedTask ? resolvedTask.title : "Select or create a task"}
           </p>
           <p className="truncate text-xs text-neutral-500">{statusSummary}</p>
         </div>
@@ -228,14 +278,17 @@ export function ChatInterface({ initialTasks, initialGitHubAuth }: ChatInterface
           {displayedEvents.map((event) => {
             const isAgent = event.tone === "agent";
             const isSystem = event.tone === "system";
+            const isHighlighted = highlightEventId === event.id;
             return (
               <div
                 key={`${event.id}-${event.timestamp}`}
+                ref={isHighlighted ? assignHighlightRef : undefined}
                 className={clsx(
                   "space-y-2 rounded-2xl border px-5 py-4 shadow-sm transition",
                   isAgent && "border-emerald-500/30 bg-emerald-500/5 text-neutral-100",
                   !isAgent && !isSystem && "border-red-500/40 bg-red-500/10 text-red-100",
-                  isSystem && "border-neutral-800 bg-neutral-900/80 text-neutral-300"
+                  isSystem && "border-neutral-800 bg-neutral-900/80 text-neutral-300",
+                  isHighlighted && "border-emerald-400/70 shadow-[0_0_0_1px_rgba(16,185,129,0.45)]"
                 )}
               >
                 <div className="flex items-center justify-between text-[11px] uppercase tracking-[0.35em] text-neutral-500">
@@ -266,6 +319,7 @@ export function ChatInterface({ initialTasks, initialGitHubAuth }: ChatInterface
       </div>
     </div>
   );
+}
 
   return (
     <div className="flex min-h-0 flex-1 flex-col gap-4 overflow-hidden xl:flex-row xl:gap-6">
@@ -303,7 +357,7 @@ export function ChatInterface({ initialTasks, initialGitHubAuth }: ChatInterface
             <span>Active</span>
             <button
               type="button"
-              onClick={openConversation}
+              onClick={() => openConversation()}
               className="rounded-full border border-neutral-800 px-2 py-1 text-[10px] text-neutral-400 transition hover:border-neutral-600 hover:text-white"
             >
               Conversation
@@ -341,8 +395,41 @@ export function ChatInterface({ initialTasks, initialGitHubAuth }: ChatInterface
                 );
               })
             )}
+            {creationMessage ? (
+              <p className={clsx("text-xs", creationMessageClass)}>{creationMessage}</p>
+            ) : null}
           </div>
         </div>
+
+        {latestDiffEvent ? (
+          <div className="rounded-3xl border border-emerald-500/30 bg-emerald-500/5 px-4 py-4 text-sm text-neutral-200">
+            <div className="flex items-center justify-between text-[11px] uppercase tracking-[0.35em] text-emerald-200">
+              <span>Latest diff</span>
+              <span className="text-[10px] text-neutral-400">
+                {new Date(latestDiffEvent.event.timestamp).toLocaleTimeString()}
+              </span>
+            </div>
+            <p className="mt-2 text-xs text-neutral-200">
+              Review the generated patch and create a pull request when you’re ready.
+            </p>
+            <div className="mt-3 flex flex-wrap gap-2">
+              <button
+                type="button"
+                onClick={() => openConversation(latestDiffEvent.event.id)}
+                className="inline-flex flex-1 items-center justify-center gap-2 rounded-full border border-emerald-500/50 bg-emerald-500/10 px-3 py-2 text-xs font-semibold text-emerald-100 transition hover:border-emerald-400 hover:text-white"
+              >
+                Review & Create PR
+              </button>
+              <button
+                type="button"
+                onClick={() => setMobilePane("workspace")}
+                className="inline-flex items-center justify-center rounded-full border border-neutral-700 px-3 py-2 text-xs text-neutral-200 transition hover:border-neutral-500 hover:text-white"
+              >
+                View diff
+              </button>
+            </div>
+          </div>
+        ) : null}
 
         <div className="rounded-3xl border border-neutral-800 bg-neutral-950/90 px-4 py-4 text-xs text-neutral-400">
           <div className="flex items-center justify-between">
@@ -351,7 +438,7 @@ export function ChatInterface({ initialTasks, initialGitHubAuth }: ChatInterface
             </span>
             <button
               type="button"
-              onClick={openConversation}
+              onClick={() => openConversation()}
               className="rounded-full border border-neutral-800 px-2 py-1 text-[10px] text-neutral-300 transition hover:border-neutral-600 hover:text-white"
             >
               View log
@@ -378,7 +465,7 @@ export function ChatInterface({ initialTasks, initialGitHubAuth }: ChatInterface
                 });
                 if (result.ok) {
                   setFollowUpText("");
-                  setCreationMessage("Follow-up sent to the agent.");
+                  setFollowUpStatus("Follow-up sent to the agent.");
                 } else if (result.error) {
                   setFollowUpError(result.error);
                 } else {
@@ -396,10 +483,8 @@ export function ChatInterface({ initialTasks, initialGitHubAuth }: ChatInterface
             />
             {followUpError ? <p className="text-xs text-red-400">{followUpError}</p> : null}
             <div className="flex items-center justify-between">
-              {creationMessage ? (
-                <span className={clsx("text-xs", creationMessageClass)}>
-                  {creationMessage}
-                </span>
+              {followUpStatus ? (
+                <span className="text-xs text-emerald-300">{followUpStatus}</span>
               ) : (
                 <span />
               )}
@@ -417,13 +502,21 @@ export function ChatInterface({ initialTasks, initialGitHubAuth }: ChatInterface
 
       <div className="flex min-h-0 flex-1 overflow-hidden">
         <div className="hidden min-h-0 flex-1 overflow-hidden rounded-3xl border border-neutral-800 bg-neutral-950/85 xl:flex">
-          <LiveFileDiffViewer updates={liveFileUpdates} className="flex-1" />
+          <LiveFileDiffViewer
+            updates={liveFileUpdates}
+            className="flex-1"
+            onReviewDiff={latestDiffEvent ? () => openConversation(latestDiffEvent.event.id) : undefined}
+          />
         </div>
         <div className="flex min-h-0 flex-1 overflow-hidden xl:hidden">
           {mobilePane === "workspace" ? (
-            <LiveFileDiffViewer updates={liveFileUpdates} className="flex-1" />
+            <LiveFileDiffViewer
+              updates={liveFileUpdates}
+              className="flex-1"
+              onReviewDiff={latestDiffEvent ? () => openConversation(latestDiffEvent.event.id) : undefined}
+            />
           ) : (
-            <ConversationPanel />
+            <ConversationPanel highlightEventId={focusedEventId} />
           )}
         </div>
       </div>
@@ -448,7 +541,7 @@ export function ChatInterface({ initialTasks, initialGitHubAuth }: ChatInterface
               </button>
             </div>
             <div className="flex-1 overflow-hidden">
-              <ConversationPanel />
+              <ConversationPanel highlightEventId={focusedEventId} />
             </div>
           </div>
         </div>
