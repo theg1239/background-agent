@@ -1,15 +1,6 @@
 "use client";
 
-import {
-  FormEvent,
-  useEffect,
-  useMemo,
-  useRef,
-  useState,
-  useCallback,
-  useTransition,
-  useLayoutEffect
-} from "react";
+import { FormEvent, useEffect, useMemo, useRef, useState, useCallback, useTransition } from "react";
 import { clsx } from "clsx";
 import type { Task, TaskEvent } from "@background-agent/shared";
 import { useTaskEvents } from "../hooks/use-task-events";
@@ -226,7 +217,9 @@ export function ChatInterface({ initialTasks, initialGitHubAuth }: ChatInterface
       ];
     }
 
-    return events.map((event) => formatEvent(event));
+    return events
+      .map((event) => formatEvent(event))
+      .sort((left, right) => right.timestamp - left.timestamp);
   }, [events, resolvedTask]);
 
   const workingSince = useMemo(() => {
@@ -469,54 +462,17 @@ export function ChatInterface({ initialTasks, initialGitHubAuth }: ChatInterface
 
   const ConversationPanel = ({ highlightEventId }: { highlightEventId?: string }) => {
     const highlightRef = useRef<HTMLDivElement | null>(null);
-    const listRef = useRef<HTMLDivElement | null>(null);
-    const scrollStateRef = useRef({
-      scrollTop: 0,
-      scrollHeight: 0,
-      eventCount: events.length
-    });
-
-    useLayoutEffect(() => {
-      const container = listRef.current;
-      if (!container) return;
-      const previous = scrollStateRef.current;
-      if (previous.eventCount !== events.length) {
-        container.scrollTop = previous.scrollTop;
-      }
-      scrollStateRef.current = {
-        scrollTop: container.scrollTop,
-        scrollHeight: container.scrollHeight,
-        eventCount: events.length
-      };
-    }, [events.length]);
-
-    const recordScrollPosition = useCallback(() => {
-      const container = listRef.current;
-      if (!container) return;
-      scrollStateRef.current = {
-        ...scrollStateRef.current,
-        scrollTop: container.scrollTop,
-        scrollHeight: container.scrollHeight
-      };
-    }, []);
 
     useEffect(() => {
       if (!highlightEventId) {
         highlightRef.current = null;
         return;
       }
-      if (highlightRef.current) {
-        highlightRef.current.scrollIntoView({ behavior: "smooth", block: "center" });
-        const container = listRef.current;
-        if (container) {
-          scrollStateRef.current = {
-            scrollTop: container.scrollTop,
-            scrollHeight: container.scrollHeight,
-            eventCount: events.length
-          };
-        }
+      const node = highlightRef.current;
+      if (node) {
+        node.scrollIntoView({ behavior: "smooth", block: "center" });
       }
-    }, [highlightEventId, events.length]);
+    }, [highlightEventId, displayedEvents]);
 
     const assignHighlightRef = useCallback((node: HTMLDivElement | null) => {
       if (node) {
@@ -537,8 +493,6 @@ export function ChatInterface({ initialTasks, initialGitHubAuth }: ChatInterface
       </div>
 
       <div
-        ref={listRef}
-        onScroll={recordScrollPosition}
         className="scrollbar flex-1 overflow-y-auto px-5 py-5"
       >
         <div className="flex flex-col gap-3">

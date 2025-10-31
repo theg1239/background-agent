@@ -365,7 +365,13 @@ export async function recordFollowUpAction(input: z.infer<typeof FollowUpSchema>
 
   await taskStore.appendEvent(taskId, followUpEvent);
 
-  return { ok: true } as const;
+  const activeStatuses = new Set(["queued", "planning", "executing", "awaiting_approval"]);
+  if (!activeStatuses.has(task.status)) {
+    await enqueueTaskExecution(task);
+    return { ok: true, restarted: true } as const;
+  }
+
+  return { ok: true, restarted: false } as const;
 }
 
 type GitTreeEntry = {
