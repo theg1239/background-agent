@@ -27,6 +27,13 @@ const MAX_GEMINI_ATTEMPTS = Math.max(config.geminiApiKeys.length * 5, 5);
 const MAX_GEMINI_WAIT_MS = 5 * 60_000;
 const delay = (ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms));
 
+const slugify = (value: string) =>
+  value
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, "-")
+    .replace(/^-+|-+$/g, "")
+    .slice(0, 48) || "analysis";
+
 export async function runTaskWithAgent({
   workerId,
   task,
@@ -436,6 +443,8 @@ Begin by emitting the initial execution plan described above.`;
     };
 
     let latestSummary = "";
+    let fallbackArtifactWritten = false;
+    let fallbackReportPath: string | undefined;
     for (let attempt = 1; attempt <= 2; attempt += 1) {
       if (attempt > 1) {
         await updateStatus("executing", "Follow-up execution after empty diff");
@@ -454,7 +463,33 @@ The first pass finished without producing tangible artifacts. Treat this follow-
       const { text, finishReason } = await generateWithGemini(prompt);
       latestSummary = text ?? "Agent finished without summary";
 
-      const diff = await workspace.getDiff();
+      let diff = await workspace.getDiff();
+      if (!diff.trim() && !fallbackArtifactWritten) {
+        const trimmedSummary = latestSummary.trim();
+        if (trimmedSummary) {
+          const safeTitle = slugify(task.title);
+          fallbackReportPath = `.background-agent/${task.id}-${safeTitle}-analysis.md`;
+          const reportContents = `# Task Analysis\n\n${trimmedSummary}\n`;
+          try {
+            const { bytes } = await workspace.writeFile(fallbackReportPath, reportContents);
+            await broadcastFileUpdate(fallbackReportPath, reportContents, null, {
+              byteLength: bytes
+            });
+            fallbackArtifactWritten = true;
+            await emitLog(
+              "info",
+              `Generated fallback analysis report at ${fallbackReportPath} after empty diff.`
+            );
+            diff = await workspace.getDiff();
+          } catch (error) {
+            await emitLog(
+              "warning",
+              `Failed to write fallback analysis report: ${(error as Error).message}`
+            );
+          }
+        }
+      }
+
       if (diff.trim()) {
         const artifactEvent = {
           id: randomUUID(),
@@ -495,6 +530,57 @@ The first pass finished without producing tangible artifacts. Treat this follow-
           "First pass produced no workspace changes; running a focused follow-up with stricter requirements."
         );
         await updateStatus("planning", "Revisiting approach after empty diff");
+      }
+    }
+
+    const failureSummary = latestSummary.trim();
+    if (failureSummary && !fallbackArtifactWritten) {
+      const safeTitle = slugify(task.title);
+      fallbackReportPath = `.background-agent/${task.id}-${safeTitle}-analysis.md`;
+      const reportContents = `# Task Analysis\n\n${failureSummary}\n`;
+      try {
+        const { bytes } = await workspace.writeFile(fallbackReportPath, reportContents);
+        await broadcastFileUpdate(fallbackReportPath, reportContents, null, {
+          byteLength: bytes
+        });
+        const diff = await workspace.getDiff();
+        if (diff.trim()) {
+          const artifactEvent = {
+            id: randomUUID(),
+            taskId: task.id,
+            type: "task.artifact_generated",
+            timestamp: Date.now(),
+            payload: {
+              artifactType: "git_diff",
+              diff,
+              workerId
+            }
+          } satisfies TaskEvent;
+          await store.appendEvent(task.id, artifactEvent);
+          await notifyTaskEvent?.(task.id, artifactEvent);
+
+          const completedEvent = {
+            id: randomUUID(),
+            taskId: task.id,
+            type: "task.completed",
+            timestamp: Date.now(),
+            payload: {
+              status: "completed",
+              summary: failureSummary,
+              workerId,
+              finishReason: "fallback_report"
+            }
+          } satisfies TaskEvent;
+          await store.appendEvent(task.id, completedEvent);
+          await notifyTaskEvent?.(task.id, completedEvent);
+          await notifyTaskUpdate?.(task.id);
+          return { success: true, summary: failureSummary } as const;
+        }
+      } catch (error) {
+        await emitLog(
+          "warning",
+          `Fallback report attempt failed: ${(error as Error).message}`
+        );
       }
     }
 
