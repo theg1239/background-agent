@@ -7,9 +7,20 @@ function required(name: string, value: string | undefined): string {
   return value;
 }
 
+function resolveRedisUrl() {
+  const candidates = [
+    process.env.UPSTASH_REDIS_URL,
+    process.env.REDIS_URL,
+    process.env.UPSTASH_REDIS_REST_URL?.replace("https://", "rediss://")
+  ];
+  for (const value of candidates) {
+    if (value) return value;
+  }
+  throw new Error("Missing UPSTASH_REDIS_URL (expected format rediss://default:password@host:6379)");
+}
+
 export const config = {
-  taskApiBaseUrl: required("TASK_API_BASE_URL", process.env.TASK_API_BASE_URL),
-  taskApiToken: required("TASK_API_TOKEN", process.env.TASK_API_TOKEN),
+  redisUrl: resolveRedisUrl(),
   pollIntervalMs: Number(process.env.QUEUE_POLL_INTERVAL_MS ?? "2500"),
   maxConcurrentTasks: Number(process.env.WORKER_MAX_CONCURRENCY ?? "2"),
   geminiApiKey: required(

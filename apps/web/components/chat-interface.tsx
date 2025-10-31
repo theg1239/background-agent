@@ -1,16 +1,11 @@
 "use client";
 
 import { useEffect, useMemo, useState } from "react";
-import useSWR from "swr";
 import { clsx } from "clsx";
-import type { Task, TaskEvent, TaskEventStreamSnapshot } from "@background-agent/shared";
-import { jsonFetcher } from "../lib/utils/fetcher";
+import type { Task, TaskEvent } from "@background-agent/shared";
 import { useTaskEvents } from "../hooks/use-task-events";
 import { CreateTaskForm } from "./create-task-form";
-
-interface TasksResponse {
-  tasks: Task[];
-}
+import { useTaskIndex } from "../hooks/use-task-index";
 
 interface ChatInterfaceProps {
   initialTasks: Task[];
@@ -19,16 +14,7 @@ interface ChatInterfaceProps {
 export function ChatInterface({ initialTasks }: ChatInterfaceProps) {
   const [activeTaskId, setActiveTaskId] = useState<string | undefined>(initialTasks[0]?.id);
   const [showHistory, setShowHistory] = useState(false);
-
-  const { data: tasksData, mutate: mutateTasks } = useSWR<TasksResponse>(
-    "/api/tasks",
-    jsonFetcher,
-    {
-      fallbackData: { tasks: initialTasks }
-    }
-  );
-
-  const tasks = tasksData?.tasks ?? initialTasks;
+  const { tasks, upsertTask } = useTaskIndex(initialTasks);
 
   const activeTask = useMemo(() => tasks.find((task) => task.id === activeTaskId), [tasks, activeTaskId]);
 
@@ -43,19 +29,12 @@ export function ChatInterface({ initialTasks }: ChatInterfaceProps) {
     }
   }, [tasks, activeTaskId]);
 
-  const { data: snapshot } = useSWR<TaskEventStreamSnapshot>(
-    activeTaskId ? `/api/tasks/${activeTaskId}` : null,
-    jsonFetcher
-  );
-
-  const { task, events, isConnected } = useTaskEvents(activeTaskId, {
-    initialSnapshot: snapshot
-  });
+  const { task, events, isConnected } = useTaskEvents(activeTaskId);
 
   const resolvedTask = task ?? activeTask;
 
   const handleTaskCreated = async (newTask: Task) => {
-    await mutateTasks();
+    upsertTask(newTask);
     setActiveTaskId(newTask.id);
     setShowHistory(false);
   };

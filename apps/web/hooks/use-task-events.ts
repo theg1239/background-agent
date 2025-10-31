@@ -18,23 +18,23 @@ export function useTaskEvents(taskId?: string, options?: Options) {
   const [isConnected, setIsConnected] = useState(false);
   const eventSourceRef = useRef<EventSource | null>(null);
 
-useEffect(() => {
-  if (options?.initialSnapshot) {
-    setTask(options.initialSnapshot.task);
-    setEvents(options.initialSnapshot.events);
-  }
-}, [options?.initialSnapshot?.task.id]);
+  useEffect(() => {
+    if (options?.initialSnapshot) {
+      setTask(options.initialSnapshot.task);
+      setEvents(options.initialSnapshot.events);
+    }
+  }, [options?.initialSnapshot?.task?.id]);
 
-useEffect(() => {
-  if (!taskId) {
-    eventSourceRef.current?.close();
-    setEvents([]);
-    setTask(undefined);
-    setIsConnected(false);
-    return;
-  }
+  useEffect(() => {
+    if (!taskId) {
+      eventSourceRef.current?.close();
+      setEvents([]);
+      setTask(undefined);
+      setIsConnected(false);
+      return;
+    }
 
-    const source = new EventSource(`/api/tasks/${taskId}/events`);
+    const source = new EventSource(`/events/tasks/${taskId}`);
     eventSourceRef.current = source;
 
     const handleSnapshot = (event: MessageEvent<string>) => {

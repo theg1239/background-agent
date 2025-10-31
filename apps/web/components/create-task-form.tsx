@@ -1,27 +1,9 @@
 "use client";
 
-import { FormEvent, useMemo, useState } from "react";
-import useSWRMutation from "swr/mutation";
+import { FormEvent, useMemo, useState, useTransition } from "react";
 import { CreateTaskInput, Task } from "@background-agent/shared";
 import { clsx } from "clsx";
-
-async function createTaskRequest(
-  url: string,
-  { arg }: { arg: CreateTaskInput }
-): Promise<{ task: Task }> {
-  const res = await fetch(url, {
-    method: "POST",
-    headers: {
-      "Content-Type": "application/json"
-    },
-    body: JSON.stringify(arg)
-  });
-  if (!res.ok) {
-    const body = await res.json().catch(() => ({}));
-    throw new Error(body?.error ?? "Failed to create task");
-  }
-  return res.json();
-}
+import { createTaskAction } from "@/app/actions/task-actions";
 
 interface CreateTaskFormProps {
   onCreated?: (task: Task) => void;
@@ -32,7 +14,8 @@ export function CreateTaskForm({ onCreated, compact = false }: CreateTaskFormPro
   const [title, setTitle] = useState("");
   const [description, setDescription] = useState("");
   const [repoUrl, setRepoUrl] = useState("");
-  const { trigger, isMutating, error } = useSWRMutation("/api/tasks", createTaskRequest);
+  const [error, setError] = useState<string | null>(null);
+  const [isPending, startTransition] = useTransition();
 
   const formClassName = useMemo(
     () =>
@@ -45,21 +28,25 @@ export function CreateTaskForm({ onCreated, compact = false }: CreateTaskFormPro
 
   const handleSubmit = async (event: FormEvent<HTMLFormElement>) => {
     event.preventDefault();
-    await trigger(
-      {
-        title,
-        description: description || undefined,
-        repoUrl: repoUrl || undefined
-      },
-      {
-        onSuccess: (data) => {
-          setTitle("");
-          setDescription("");
-          setRepoUrl("");
-          onCreated?.(data.task);
-        }
+    setError(null);
+    const input: CreateTaskInput = {
+      title,
+      description: description || undefined,
+      repoUrl: repoUrl || undefined
+    };
+
+    startTransition(async () => {
+      const result = await createTaskAction(input);
+      if (!result.ok || !result.task) {
+        setError(result.error ?? "Failed to create task");
+        return;
       }
-    );
+
+      setTitle("");
+      setDescription("");
+      setRepoUrl("");
+      onCreated?.(result.task);
+    });
   };
 
   const inputClass = "mt-2 w-full rounded-xl border border-neutral-800 bg-neutral-950 px-3 py-2 text-sm text-neutral-100 focus:border-neutral-600 focus:outline-none";
@@ -113,15 +100,15 @@ export function CreateTaskForm({ onCreated, compact = false }: CreateTaskFormPro
           placeholder="Share goals, tools, acceptance criteria..."
         />
       </div>
-      {error ? <p className="mt-2 text-sm text-red-400">{error.message}</p> : null}
+      {error ? <p className="mt-2 text-sm text-red-400">{error}</p> : null}
       <div className="mt-4 flex items-center justify-between gap-3">
         <p className="hidden text-xs text-neutral-500 sm:block">The agent queues instantly and streams progress as it works.</p>
         <button
           type="submit"
-          disabled={isMutating}
+          disabled={isPending}
           className="rounded-full bg-white px-5 py-2 text-sm font-semibold text-black transition hover:bg-neutral-200 disabled:cursor-not-allowed disabled:bg-neutral-800 disabled:text-neutral-400"
         >
-          {isMutating ? "Sending..." : "Send to agent"}
+          {isPending ? "Sending..." : "Send to agent"}
         </button>
       </div>
     </form>

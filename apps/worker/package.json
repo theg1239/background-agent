@@ -12,6 +12,7 @@
     "@background-agent/shared": "workspace:*",
     "@ai-sdk/google": "2.0.26",
     "ai": "6.0.0-beta.90",
+    "ioredis": "^5.4.1",
     "dotenv": "^16.4.5",
     "zod": "^3.25.76"
   },

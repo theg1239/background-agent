@@ -4,25 +4,24 @@ import type { LanguageModel } from "ai";
 import { z } from "zod";
 import { createGoogleGenerativeAI } from "@ai-sdk/google";
 import type { CreateTaskInput, Task, TaskPlanStep } from "@background-agent/shared";
-import { TaskStatusSchema } from "@background-agent/shared";
+import { TaskStatusSchema, TaskStore } from "@background-agent/shared";
 import { config } from "./config";
-import { TaskApiClient } from "./task-api";
 import { Workspace } from "./workspace";
 
 interface RunTaskOptions {
   workerId: string;
   task: Task;
   input: CreateTaskInput;
-  api: TaskApiClient;
+  store: TaskStore;
 }
 
 const google = createGoogleGenerativeAI({ apiKey: config.geminiApiKey });
 
-export async function runTaskWithAgent({ workerId, task, input, api }: RunTaskOptions) {
+export async function runTaskWithAgent({ workerId, task, input, store }: RunTaskOptions) {
   const workspace = await Workspace.prepare(task.id);
 
   const emitLog = async (level: "info" | "warning" | "error", message: string) => {
-    await api.postEvent(task.id, {
+    await store.appendEvent(task.id, {
       id: randomUUID(),
       taskId: task.id,
       type: "log.entry",
@@ -56,17 +55,7 @@ export async function runTaskWithAgent({ workerId, task, input, api }: RunTaskOp
       return;
     }
 
-    await api.postEvent(task.id, {
-      id: randomUUID(),
-      taskId: task.id,
-      type: "task.updated",
-      timestamp: Date.now(),
-      payload: {
-        status: parsed.data,
-        reason,
-        workerId
-      }
-    });
+    await store.updateStatus(task.id, parsed.data, { reason, workerId });
   };
 
   try {
@@ -116,7 +105,7 @@ export async function runTaskWithAgent({ workerId, task, input, api }: RunTaskOp
                 status: step.status ?? "pending"
               }))
             );
-            await api.postEvent(task.id, {
+            await store.appendEvent(task.id, {
               id: randomUUID(),
               taskId: task.id,
               type: "plan.updated",
@@ -228,12 +217,12 @@ Start by emitting an initial plan covering research, implementation, testing, an
 
     const diff = await workspace.getDiff();
     if (diff.trim()) {
-      await api.postEvent(task.id, {
-        id: randomUUID(),
-        taskId: task.id,
-        type: "task.artifact_generated",
-        timestamp: Date.now(),
-        payload: {
+    await store.appendEvent(task.id, {
+      id: randomUUID(),
+      taskId: task.id,
+      type: "task.artifact_generated",
+      timestamp: Date.now(),
+      payload: {
           artifactType: "git_diff",
           diff,
           workerId
@@ -241,7 +230,7 @@ Start by emitting an initial plan covering research, implementation, testing, an
       });
     }
 
-    await api.postEvent(task.id, {
+    await store.appendEvent(task.id, {
       id: randomUUID(),
       taskId: task.id,
       type: "task.completed",

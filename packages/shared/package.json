@@ -15,7 +15,8 @@
     "lint": "echo 'no lint configured'"
   },
   "dependencies": {
-    "zod": "^3.25.76"
+    "zod": "^3.25.76",
+    "ioredis": "^5.4.1"
   },
   "devDependencies": {
     "tsup": "^8.1.0",

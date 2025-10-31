@@ -1,37 +1,52 @@
 import { randomUUID } from "node:crypto";
 import { setTimeout as sleep } from "node:timers/promises";
+import Redis from "ioredis";
+import { TaskQueue, TaskStore } from "@background-agent/shared";
 import { config } from "./config";
-import { TaskApiClient } from "./task-api";
 import { runTaskWithAgent } from "./task-runner";
 
 const workerId = process.env.WORKER_ID ?? randomUUID();
-const api = new TaskApiClient(config.taskApiBaseUrl, config.taskApiToken);
+
+const redis = new Redis(config.redisUrl, {
+  maxRetriesPerRequest: null,
+  enableReadyCheck: false,
+  lazyConnect: false
+});
+
+const store = new TaskStore(redis);
+const queue = new TaskQueue(redis, store);
 
 async function processLoop() {
   // eslint-disable-next-line no-constant-condition
   while (true) {
     try {
-      const claim = await api.claimTask(workerId);
+      const claim = await queue.claim(workerId);
       if (!claim) {
         await sleep(config.pollIntervalMs);
         continue;
       }
 
+      const { task, input } = claim;
+
+      await store.updateStatus(task.id, "planning", { workerId });
+
       try {
         const result = await runTaskWithAgent({
-          api,
+          store,
           workerId,
-          task: claim.task,
-          input: claim.input
+          task,
+          input
         });
+
         if (!result.success) {
           throw new Error("Agent did not report success");
         }
-        await api.ackTask(claim.task.id, { requeue: false });
+
+        await queue.ack(task.id);
       } catch (error) {
-        await api.postEvent(claim.task.id, {
+        await store.appendEvent(task.id, {
           id: randomUUID(),
-          taskId: claim.task.id,
+          taskId: task.id,
           type: "task.failed",
           timestamp: Date.now(),
           payload: {
@@ -40,7 +55,7 @@ async function processLoop() {
             workerId
           }
         });
-        await api.ackTask(claim.task.id, { requeue: false });
+        await queue.ack(task.id);
       }
     } catch (outerError) {
       console.error("Worker loop error", outerError);
