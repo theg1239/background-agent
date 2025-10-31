@@ -442,6 +442,30 @@ Begin by emitting the initial execution plan described above.`;
       throw lastError instanceof Error ? lastError : new Error(message);
     };
 
+    // One-time prompt refinement step to clarify objectives and constraints
+    let refinedBrief = "";
+    try {
+      await emitLog("info", "Refining task prompt and constraints...");
+      const refinePrompt = `You are a prompt refinement assistant for a background coding agent. Rewrite and clarify the task below into a concise \"Refined Brief\" with:\n\n- Objectives (3-5 bullet points)\n- Assumptions (explicit, reasonable)\n- Constraints and non-goals\n- Deliverables (what counts as \"done\")\n- Validation plan (how to verify)\n\nKeep it under 200 words, in markdown. Do not include code. Avoid speculation about the repo beyond what is given.\n\nTask title: ${task.title}\nTask description: ${task.description ?? "(none provided)"}\nRepository URL: ${input.repoUrl ?? "(not supplied)"}\nConstraints: ${(input.constraints ?? []).join("; ") || "None"}\nWorking branch: ${input.branch ?? "(not specified)"} (base: ${input.baseBranch ?? "main"})`;
+
+      const refinement = await generateWithGemini(refinePrompt);
+      refinedBrief = (refinement.text ?? "").trim();
+      if (refinedBrief) {
+        await emitLog("info", `Refined Brief:\n\n${refinedBrief}`);
+      } else {
+        await emitLog("warning", "Prompt refinement returned empty text; proceeding with base prompt.");
+      }
+    } catch (error) {
+      await emitLog(
+        "warning",
+        `Prompt refinement failed: ${(error as Error).message}. Proceeding without refinement.`
+      );
+    }
+
+    const effectiveBasePrompt = refinedBrief
+      ? `${basePrompt}\n\nRefined Brief\n${refinedBrief}`
+      : basePrompt;
+
     let latestSummary = "";
     let fallbackArtifactWritten = false;
     let fallbackReportPath: string | undefined;
@@ -460,8 +484,8 @@ Begin by emitting the initial execution plan described above.`;
 
       const prompt =
         attempt === 1
-          ? basePrompt
-          : `${basePrompt}
+          ? effectiveBasePrompt
+          : `${effectiveBasePrompt}
 
 Previous passes (${attempt - 1}) finished without producing shippable artifacts. You are on pass ${attempt} of ${maxAgentPasses}. Treat this run as a critical escalation:
 - Ship a concrete deliverable before exiting (code change, new file, or detailed written assessment).
