@@ -6,15 +6,25 @@ export const dynamic = "force-dynamic";
 
 export async function GET(
   request: NextRequest,
-  { params }: { params: { taskId?: string | string[] } }
+  context: { params: Promise<{ taskId?: string | string[] }> }
 ) {
   await getSessionId();
 
-  const rawTaskId = params?.taskId;
+  const resolvedParams = await context.params;
+
+  const rawTaskId = resolvedParams?.taskId;
   const candidate = Array.isArray(rawTaskId) ? rawTaskId[0] : rawTaskId;
   const taskIdFromParams = typeof candidate === "string" ? candidate.trim() : undefined;
 
-  const taskId = taskIdFromParams ?? request.nextUrl.pathname.split("/")[3]?.trim();
+  let taskId = taskIdFromParams;
+
+  if (!taskId) {
+    const segments = request.nextUrl.pathname.split("/").filter(Boolean);
+    const tasksIndex = segments.indexOf("tasks");
+    if (tasksIndex >= 0 && segments.length > tasksIndex + 1) {
+      taskId = segments[tasksIndex + 1]?.trim() ?? undefined;
+    }
+  }
 
   if (!taskId) {
     return NextResponse.json(
