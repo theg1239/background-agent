@@ -212,7 +212,7 @@ export async function runTaskWithAgent({
 - Decompose work into small, verifiable steps and validate each change.
 - Never fabricate repository results; if you need external context, request human input via logs.
 - Do not mark the task complete until you have produced concrete artifacts (code changes, documentation updates, or a detailed security report) that justify completion.`,
-        stopWhen: stepCountIs(30),
+        stopWhen: stepCountIs(config.agentStepLimit),
         tools: {
           updatePlan: tool({
             description: "Update the execution plan with the latest steps and statuses.",
@@ -445,9 +445,17 @@ Begin by emitting the initial execution plan described above.`;
     let latestSummary = "";
     let fallbackArtifactWritten = false;
     let fallbackReportPath: string | undefined;
-    for (let attempt = 1; attempt <= 2; attempt += 1) {
+    const maxAgentPasses = Math.max(1, config.agentMaxPasses);
+    for (let attempt = 1; attempt <= maxAgentPasses; attempt += 1) {
       if (attempt > 1) {
-        await updateStatus("executing", "Follow-up execution after empty diff");
+        await emitLog(
+          "info",
+          `Re-running agent pass ${attempt} of ${maxAgentPasses} after previous pass produced no diff.`
+        );
+        await updateStatus(
+          "executing",
+          `Follow-up execution (pass ${attempt} of ${maxAgentPasses})`
+        );
       }
 
       const prompt =
@@ -455,10 +463,10 @@ Begin by emitting the initial execution plan described above.`;
           ? basePrompt
           : `${basePrompt}
 
-The first pass finished without producing tangible artifacts. Treat this follow-up as a high-priority escalation:
-- Identify a concrete deliverable you can complete within this attempt (code change, new file, or detailed written assessment).
-- Narrow scope; act decisively—do not rehash the previous plan without executing.
-- If code changes truly are unnecessary, produce a written artifact (e.g. SECURITY.md update or incident note) that captures why.`;
+Previous passes (${attempt - 1}) finished without producing shippable artifacts. You are on pass ${attempt} of ${maxAgentPasses}. Treat this run as a critical escalation:
+- Ship a concrete deliverable before exiting (code change, new file, or detailed written assessment).
+- Narrow scope, execute decisively, and validate results via repository evidence.
+- If implementation is unnecessary, capture findings in a written artifact that justifies completion.`;
 
       const { text, finishReason } = await generateWithGemini(prompt);
       latestSummary = text ?? "Agent finished without summary";
@@ -524,12 +532,15 @@ The first pass finished without producing tangible artifacts. Treat this follow-
         return { success: true, summary: latestSummary } as const;
       }
 
-      if (attempt === 1) {
+      if (attempt < maxAgentPasses) {
         await emitLog(
           "warning",
-          "First pass produced no workspace changes; running a focused follow-up with stricter requirements."
+          `Agent pass ${attempt} completed without tangible output; preparing pass ${attempt + 1} of ${maxAgentPasses}.`
         );
-        await updateStatus("planning", "Revisiting approach after empty diff");
+        await updateStatus(
+          "planning",
+          `Revisiting approach after empty diff (pass ${attempt})`
+        );
       }
     }
 

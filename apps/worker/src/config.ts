@@ -17,6 +17,14 @@ function requiredList(name: string, raw: string | undefined): string[] {
   return values;
 }
 
+function positiveInteger(name: string, fallback: number): number {
+  const raw = process.env[name];
+  if (!raw) return fallback;
+  const parsed = Number(raw);
+  if (!Number.isFinite(parsed) || parsed <= 0) return fallback;
+  return Math.floor(parsed);
+}
+
 function resolveRedisUrl() {
   const candidates = [
     process.env.UPSTASH_REDIS_URL,
@@ -48,5 +56,7 @@ export const config = {
       .split(",")
       .map((value) => value.trim())
       .filter((value) => value.length > 0);
-  })()
+  })(),
+  agentMaxPasses: positiveInteger("AGENT_MAX_PASSES", 3),
+  agentStepLimit: positiveInteger("AGENT_STEP_LIMIT", 60)
 };
