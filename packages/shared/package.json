@@ -12,7 +12,8 @@
   },
   "scripts": {
     "build": "tsup src/index.ts --format esm --dts",
-    "lint": "echo 'no lint configured'"
+    "lint": "echo 'no lint configured'",
+    "prepare": "pnpm run build"
   },
   "dependencies": {
     "zod": "^3.25.76",
