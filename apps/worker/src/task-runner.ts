@@ -82,7 +82,7 @@ export async function runTaskWithAgent({ workerId, task, input, api }: RunTaskOp
       await emitLog("info", "No repository URL provided; starting with empty workspace");
     }
 
-    const model = google("models/gemini-2.5-pro");
+    const model = google("gemini-2.5-flash");
 
     const agent = new ToolLoopAgent({
       model: model as unknown as LanguageModel,
