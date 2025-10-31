@@ -24,13 +24,20 @@ export class TaskQueue {
     await this.redis.rpush(QUEUE_KEY, taskId);
   }
 
-  async claim(workerId: string): Promise<TaskClaim | undefined> {
-    await this.requeueLeases();
+  async claim(workerId: string, options?: { blockSeconds?: number }): Promise<TaskClaim | undefined> {
+    const blockSeconds = Math.max(1, Math.floor(options?.blockSeconds ?? 5));
 
     while (true) {
-      const taskId = await this.redis.lpop(QUEUE_KEY);
-      if (!taskId) {
+      await this.requeueLeases();
+
+      const result = await this.redis.blpop(QUEUE_KEY, blockSeconds);
+      if (!result) {
         return undefined;
+      }
+
+      const taskId = Array.isArray(result) ? result[1] : result;
+      if (!taskId) {
+        continue;
       }
 
       const removed = await this.redis.srem(PENDING_SET_KEY, taskId);

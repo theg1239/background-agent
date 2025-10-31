@@ -26,11 +26,13 @@ export function useTaskEvents(taskId?: string, options?: Options) {
   }, [options?.initialSnapshot?.task?.id]);
 
   useEffect(() => {
-    if (!taskId) {
+    if (!taskId || taskId.startsWith("temp-")) {
       eventSourceRef.current?.close();
-      setEvents([]);
-      setTask(undefined);
       setIsConnected(false);
+      if (!taskId) {
+        setEvents([]);
+        setTask(undefined);
+      }
       return;
     }
 
@@ -53,11 +55,14 @@ export function useTaskEvents(taskId?: string, options?: Options) {
         }
         return [...prev, parsed].sort((a, b) => a.timestamp - b.timestamp);
       });
-      if (parsed.payload?.status) {
-        setTask((prev) => (prev ? { ...prev, status: parsed.payload.status } : prev));
+      const statusUpdate = parsed.payload?.status;
+      if (typeof statusUpdate === "string") {
+        setTask((prev) => (prev ? { ...prev, status: statusUpdate } : prev));
       }
-      if (parsed.payload?.plan) {
-        setTask((prev) => (prev ? { ...prev, plan: parsed.payload.plan } : prev));
+
+      const planUpdate = parsed.payload?.plan;
+      if (Array.isArray(planUpdate)) {
+        setTask((prev) => (prev ? { ...prev, plan: planUpdate } : prev));
       }
     };
 

@@ -1,11 +1,12 @@
 "use client";
 
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { clsx } from "clsx";
 import type { Task, TaskEvent } from "@background-agent/shared";
 import { useTaskEvents } from "../hooks/use-task-events";
 import { CreateTaskForm } from "./create-task-form";
 import { useTaskIndex } from "../hooks/use-task-index";
+import { DiffArtifactCard } from "./diff-artifact-card";
 
 interface ChatInterfaceProps {
   initialTasks: Task[];
@@ -14,7 +15,9 @@ interface ChatInterfaceProps {
 export function ChatInterface({ initialTasks }: ChatInterfaceProps) {
   const [activeTaskId, setActiveTaskId] = useState<string | undefined>(initialTasks[0]?.id);
   const [showHistory, setShowHistory] = useState(false);
-  const { tasks, upsertTask } = useTaskIndex(initialTasks);
+  const [creationMessage, setCreationMessage] = useState<string | null>(null);
+  const { tasks, upsertTask, replaceTask, removeTask } = useTaskIndex(initialTasks);
+  const optimisticIds = useRef(new Set<string>());
 
   const activeTask = useMemo(() => tasks.find((task) => task.id === activeTaskId), [tasks, activeTaskId]);
 
@@ -33,10 +36,37 @@ export function ChatInterface({ initialTasks }: ChatInterfaceProps) {
 
   const resolvedTask = task ?? activeTask;
 
-  const handleTaskCreated = async (newTask: Task) => {
-    upsertTask(newTask);
-    setActiveTaskId(newTask.id);
-    setShowHistory(false);
+  const handleTaskCreated = (newTask: Task, meta?: { optimisticId?: string; isOptimistic?: boolean }) => {
+    if (meta?.optimisticId) {
+      if (meta.isOptimistic) {
+        optimisticIds.current.add(meta.optimisticId);
+        upsertTask(newTask);
+        setActiveTaskId(newTask.id);
+        setCreationMessage(`Queued "${newTask.title}"`);
+        setShowHistory(false);
+      } else {
+        replaceTask(meta.optimisticId, newTask);
+        if (optimisticIds.current.has(meta.optimisticId)) {
+          optimisticIds.current.delete(meta.optimisticId);
+        }
+        setActiveTaskId((current) => (current === meta.optimisticId ? newTask.id : current));
+        setCreationMessage(`Agent picked up "${newTask.title}"`);
+      }
+    } else {
+      upsertTask(newTask);
+      setActiveTaskId(newTask.id);
+      setCreationMessage(`Queued "${newTask.title}"`);
+      setShowHistory(false);
+    }
+  };
+
+  const handleTaskCreateFailed = (optimisticId: string, message: string) => {
+    if (optimisticIds.current.has(optimisticId)) {
+      optimisticIds.current.delete(optimisticId);
+    }
+    removeTask(optimisticId);
+    setActiveTaskId((current) => (current === optimisticId ? undefined : current));
+    setCreationMessage(`Failed to create task: ${message}`);
   };
 
   const displayedEvents = useMemo((): DisplayEvent[] => {
@@ -55,12 +85,72 @@ export function ChatInterface({ initialTasks }: ChatInterfaceProps) {
     return events.map((event) => formatEvent(event));
   }, [events, resolvedTask]);
 
+  const workingSince = useMemo(() => {
+    if (!resolvedTask) return undefined;
+    const workingStatuses = new Set(["planning", "executing", "awaiting_approval"]);
+    if (!workingStatuses.has(resolvedTask.status)) return undefined;
+
+    for (let index = events.length - 1; index >= 0; index -= 1) {
+      const event = events[index];
+      if (event.type === "task.updated") {
+        const status = event.payload?.status;
+        if (typeof status === "string" && workingStatuses.has(status)) {
+          return event.timestamp;
+        }
+      }
+    }
+
+    return resolvedTask.updatedAt ?? resolvedTask.createdAt;
+  }, [events, resolvedTask]);
+
+  const [nowTick, setNowTick] = useState(Date.now());
+
+  useEffect(() => {
+    if (!workingSince) return undefined;
+    setNowTick(Date.now());
+    const interval = setInterval(() => setNowTick(Date.now()), 1_000);
+    return () => clearInterval(interval);
+  }, [workingSince]);
+
+  const workingDuration = workingSince ? Math.max(0, nowTick - workingSince) : undefined;
+
+  const workingLabel = useMemo(() => (workingDuration ? formatDuration(workingDuration) : null), [workingDuration]);
+
+  const statusSummary = useMemo(() => {
+    if (!resolvedTask) return "Idle";
+    const statusText = humanizeStatus(resolvedTask.status);
+    if (workingLabel) {
+      return `${statusText} • working for ${workingLabel}`;
+    }
+    return statusText;
+  }, [resolvedTask, workingLabel]);
+
+  useEffect(() => {
+    if (!creationMessage) return undefined;
+    const timeout = setTimeout(() => setCreationMessage(null), 5_000);
+    return () => clearTimeout(timeout);
+  }, [creationMessage]);
+
+  const creationMessageClass = creationMessage?.startsWith("Failed")
+    ? "text-red-400"
+    : "text-neutral-400";
+
+  const isOptimisticActive = Boolean(activeTaskId && activeTaskId.startsWith("temp-"));
+  const connectionLabel = isOptimisticActive ? "Starting" : isConnected ? "Live" : "Reconnecting";
+  const connectionClass = isOptimisticActive
+    ? "text-amber-300"
+    : isConnected
+    ? "text-emerald-400"
+    : "text-amber-400";
+
+
   return (
     <div className="relative mx-auto flex h-full w-full max-w-3xl flex-1 flex-col gap-5 px-4 pb-10">
       <header className="flex items-center justify-between pt-6">
         <div className="space-y-1">
           <span className="text-[11px] uppercase tracking-[0.4em] text-neutral-500">Background Agent</span>
           <h1 className="text-2xl font-semibold text-white">Get progress updates without waiting around</h1>
+          <p className="text-sm text-neutral-400">Create a task and check back later—the agent keeps working and streams every milestone live.</p>
         </div>
         <button
           type="button"
@@ -79,14 +169,12 @@ export function ChatInterface({ initialTasks }: ChatInterfaceProps) {
             <p className="truncate text-lg font-medium text-white">
               {resolvedTask ? resolvedTask.title : "Waiting for instructions"}
             </p>
+            <p className="truncate text-xs text-neutral-500">
+              {statusSummary}
+            </p>
           </div>
-          <span
-            className={clsx(
-              "text-xs font-medium",
-              isConnected ? "text-emerald-400" : "text-amber-400"
-            )}
-          >
-            {isConnected ? "Live" : "Reconnecting"}
+          <span className={clsx("text-xs font-medium", connectionClass)}>
+            {connectionLabel}
           </span>
         </div>
 
@@ -111,12 +199,24 @@ export function ChatInterface({ initialTasks }: ChatInterfaceProps) {
                   {event.detail}
                 </pre>
               ) : null}
+              {event.artifactType === "git_diff" && event.diff && resolvedTask ? (
+                <DiffArtifactCard
+                  diff={event.diff}
+                  taskId={resolvedTask.id}
+                  eventId={event.eventId ?? event.id}
+                  taskTitle={resolvedTask.title}
+                  repoUrl={resolvedTask.repoUrl}
+                />
+              ) : null}
             </div>
           ))}
         </div>
 
         <div className="border-t border-neutral-800 px-5 py-5">
-          <CreateTaskForm onCreated={handleTaskCreated} compact />
+          <CreateTaskForm onCreated={handleTaskCreated} onFailed={handleTaskCreateFailed} compact />
+          {creationMessage ? (
+            <p className={`mt-3 text-xs ${creationMessageClass}`}>{creationMessage}</p>
+          ) : null}
         </div>
       </div>
 
@@ -168,9 +268,35 @@ type DisplayEvent = {
   label: string;
   body: string;
   detail?: string;
+  artifactType?: string;
+  diff?: string;
+  eventId?: string;
   tone: "agent" | "system" | "alert";
   timestamp: number;
 };
+
+function humanizeStatus(status: string) {
+  return status
+    .split("_")
+    .map((part) => part.charAt(0).toUpperCase() + part.slice(1))
+    .join(" ");
+}
+
+function formatDuration(ms: number) {
+  const totalSeconds = Math.max(0, Math.floor(ms / 1_000));
+  const hours = Math.floor(totalSeconds / 3_600);
+  const minutes = Math.floor((totalSeconds % 3_600) / 60);
+  const seconds = totalSeconds % 60;
+  const parts = [] as string[];
+  if (hours) {
+    parts.push(`${hours}h`);
+  }
+  if (minutes || hours) {
+    parts.push(`${minutes.toString().padStart(hours ? 2 : 1, "0")}m`);
+  }
+  parts.push(`${seconds.toString().padStart(parts.length ? 2 : 1, "0")}s`);
+  return parts.join(" ");
+}
 
 function formatEvent(event: TaskEvent): DisplayEvent {
   const base = {
@@ -220,6 +346,22 @@ function formatEvent(event: TaskEvent): DisplayEvent {
         label: "Task failed",
         body: event.payload?.error ?? "The agent reported a failure.",
         tone: "alert"
+      };
+    }
+    case "task.artifact_generated": {
+      const artifactType = event.payload?.artifactType;
+      const diff = typeof event.payload?.diff === "string" ? event.payload.diff : undefined;
+      return {
+        ...base,
+        label: artifactType === "git_diff" ? "Patch ready" : "Artifact generated",
+        body:
+          artifactType === "git_diff"
+            ? "A new git diff is ready to review."
+            : JSON.stringify(event.payload ?? {}, null, 2),
+        tone: artifactType === "git_diff" ? "agent" : "system",
+        artifactType,
+        diff,
+        eventId: event.id
       };
     }
     default: {

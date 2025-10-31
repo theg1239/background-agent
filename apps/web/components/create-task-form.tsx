@@ -3,19 +3,22 @@
 import { FormEvent, useMemo, useState, useTransition } from "react";
 import { CreateTaskInput, Task } from "@background-agent/shared";
 import { clsx } from "clsx";
-import { createTaskAction } from "@/app/actions/task-actions";
+import { createTaskAction } from "../app/actions/task-actions";
 
 interface CreateTaskFormProps {
-  onCreated?: (task: Task) => void;
+  onCreated?: (task: Task, meta?: { optimisticId?: string; isOptimistic?: boolean }) => void;
+  onFailed?: (optimisticId: string, error: string) => void;
   compact?: boolean;
 }
 
-export function CreateTaskForm({ onCreated, compact = false }: CreateTaskFormProps) {
+export function CreateTaskForm({ onCreated, onFailed, compact = false }: CreateTaskFormProps) {
   const [title, setTitle] = useState("");
   const [description, setDescription] = useState("");
   const [repoUrl, setRepoUrl] = useState("");
   const [error, setError] = useState<string | null>(null);
-  const [isPending, startTransition] = useTransition();
+  const [, startTransition] = useTransition();
+  const [isSubmitting, setIsSubmitting] = useState(false);
+  const [buttonLabel, setButtonLabel] = useState("Send to agent");
 
   const formClassName = useMemo(
     () =>
@@ -29,23 +32,59 @@ export function CreateTaskForm({ onCreated, compact = false }: CreateTaskFormPro
   const handleSubmit = async (event: FormEvent<HTMLFormElement>) => {
     event.preventDefault();
     setError(null);
-    const input: CreateTaskInput = {
-      title,
-      description: description || undefined,
-      repoUrl: repoUrl || undefined
+    if (isSubmitting) return;
+
+    const sanitizedInput: CreateTaskInput = {
+      title: title.trim(),
+      description: description.trim() || undefined,
+      repoUrl: repoUrl.trim() || undefined
     };
 
-    startTransition(async () => {
-      const result = await createTaskAction(input);
-      if (!result.ok || !result.task) {
-        setError(result.error ?? "Failed to create task");
-        return;
-      }
+    const optimisticId = `temp-${Date.now()}`;
+    const now = Date.now();
+    const optimisticTask: Task = {
+      id: optimisticId,
+      title: sanitizedInput.title,
+      description: sanitizedInput.description,
+      repoUrl: sanitizedInput.repoUrl,
+      status: "queued",
+      plan: [],
+      createdAt: now,
+      updatedAt: now,
+      latestEventId: undefined,
+      assignee: undefined,
+      riskScore: 0.2
+    };
 
-      setTitle("");
-      setDescription("");
-      setRepoUrl("");
-      onCreated?.(result.task);
+    onCreated?.(optimisticTask, { optimisticId, isOptimistic: true });
+    setIsSubmitting(true);
+    setButtonLabel("Queued...");
+
+    startTransition(() => {
+      (async () => {
+        const result = await createTaskAction(sanitizedInput);
+        if (!result.ok || !result.task) {
+          const message = result.error ?? "Failed to create task";
+          setError(message);
+          onFailed?.(optimisticId, message);
+          setIsSubmitting(false);
+          setButtonLabel("Send to agent");
+          return;
+        }
+
+        setTitle("");
+        setDescription("");
+        setRepoUrl("");
+        onCreated?.(result.task, { optimisticId, isOptimistic: false });
+        setIsSubmitting(false);
+        setButtonLabel("Send to agent");
+      })().catch((actionError: unknown) => {
+        const message = (actionError as Error).message ?? "Failed to create task";
+        setError(message);
+        onFailed?.(optimisticId, message);
+        setIsSubmitting(false);
+        setButtonLabel("Send to agent");
+      });
     });
   };
 
@@ -105,10 +144,10 @@ export function CreateTaskForm({ onCreated, compact = false }: CreateTaskFormPro
         <p className="hidden text-xs text-neutral-500 sm:block">The agent queues instantly and streams progress as it works.</p>
         <button
           type="submit"
-          disabled={isPending}
+          disabled={isSubmitting}
           className="rounded-full bg-white px-5 py-2 text-sm font-semibold text-black transition hover:bg-neutral-200 disabled:cursor-not-allowed disabled:bg-neutral-800 disabled:text-neutral-400"
         >
-          {isPending ? "Sending..." : "Send to agent"}
+          {buttonLabel}
         </button>
       </div>
     </form>

@@ -1,5 +1,5 @@
 import { NextRequest, NextResponse } from "next/server";
-import { taskStore, serializeSSE } from "@/lib/server/task-store";
+import { taskStore, serializeSSE } from "../../../../lib/server/task-store";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";

@@ -21,7 +21,7 @@ function resolveRedisUrl() {
 
 export const config = {
   redisUrl: resolveRedisUrl(),
-  pollIntervalMs: Number(process.env.QUEUE_POLL_INTERVAL_MS ?? "2500"),
+  pollIntervalMs: Number(process.env.QUEUE_POLL_INTERVAL_MS ?? "1000"),
   maxConcurrentTasks: Number(process.env.WORKER_MAX_CONCURRENCY ?? "2"),
   geminiApiKey: required(
     "GOOGLE_GENERATIVE_AI_API_KEY",

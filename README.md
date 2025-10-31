@@ -22,6 +22,7 @@ Create `.env.local` (never commit secrets):
 
 ```bash
 UPSTASH_REDIS_URL="rediss://default:<token>@host:6379"  # Upstash Redis TLS URL
+GITHUB_TOKEN="<personal-access-token>"               # Needed for PR creation
 ```
 
 ### Worker (`apps/worker`)
@@ -55,7 +56,7 @@ pnpm --filter @background-agent/worker dev
 1. **Task creation** – Users submit title/description/repo URL from the dashboard.
 2. **Redis-backed queue** – Server actions enqueue work via Redis lists + lease tracking. The worker claims tasks directly through the shared queue helpers (no HTTP round-trips).
 3. **Agent execution** – Worker uses AI SDK 6 `ToolLoopAgent` with Gemini 2.5 Pro to plan, log, and update status while manipulating a local Git workspace (clone, read/write files, run commands).
-4. **Event streaming** – Frontend subscribes via Server-Sent Events (`/events/tasks` for task index + `/events/tasks/:id`) to replay historical and live updates. UI displays plan, status, log timeline, and generated artifacts like git diffs.
+4. **Event streaming** – Frontend subscribes via Server-Sent Events (`/events/tasks` for task index + `/events/tasks/:id`) to replay historical and live updates. UI displays plan, status, log timeline, and generated artifacts like git diffs with one-click copy/apply and GitHub PR creation.
 5. **Completion** – Agent emits `task.completed` (or `task.failed`) and the worker ACKs the queue item.
 
 ## Deployment Notes

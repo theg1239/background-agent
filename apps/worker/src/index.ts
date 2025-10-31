@@ -20,9 +20,9 @@ async function processLoop() {
   // eslint-disable-next-line no-constant-condition
   while (true) {
     try {
-      const claim = await queue.claim(workerId);
+      const blockSeconds = Math.max(1, Math.floor(config.pollIntervalMs / 1000));
+      const claim = await queue.claim(workerId, { blockSeconds });
       if (!claim) {
-        await sleep(config.pollIntervalMs);
         continue;
       }
 
@@ -59,7 +59,7 @@ async function processLoop() {
       }
     } catch (outerError) {
       console.error("Worker loop error", outerError);
-      await sleep(config.pollIntervalMs * 2);
+      await sleep(config.pollIntervalMs);
     }
   }
 }

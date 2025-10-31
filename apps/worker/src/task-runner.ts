@@ -73,21 +73,22 @@ export async function runTaskWithAgent({ workerId, task, input, store }: RunTask
 
     const model = google("gemini-2.5-flash");
 
-    const agent = new ToolLoopAgent({
-      model: model as unknown as LanguageModel,
-      instructions: `You are an autonomous senior software engineer inside a background task runner.
+    const createAgent = () =>
+      new ToolLoopAgent({
+        model: model as unknown as LanguageModel,
+        instructions: `You are an autonomous senior software engineer inside a background task runner.
 - Always maintain an explicit execution plan.
 - Use the provided tools to update the plan, log progress, change task status, and work with the repository.
-- Decompose work into small, verifiable steps.
+- Decompose work into small, verifiable steps and validate each change.
 - Never fabricate repository results; if you need external context, request human input via logs.
-- Finish once the task is ready for human review and summarize key artifacts.`,
-      stopWhen: stepCountIs(18),
-      tools: {
-        updatePlan: tool({
-          description: "Update the execution plan with the latest steps and statuses.",
-          inputSchema: z.object({
-            steps: z.array(
-              z.object({
+- Do not mark the task complete until you have produced concrete artifacts (code changes, documentation updates, or a detailed security report) that justify completion.`,
+        stopWhen: stepCountIs(30),
+        tools: {
+          updatePlan: tool({
+            description: "Update the execution plan with the latest steps and statuses.",
+            inputSchema: z.object({
+              steps: z.array(
+                z.object({
                 id: z.string().optional(),
                 title: z.string(),
                 summary: z.string().optional(),
@@ -197,8 +198,7 @@ export async function runTaskWithAgent({ workerId, task, input, store }: RunTask
     });
 
     await updateStatus("executing", "Plan execution started");
-
-    const prompt = `You are working on task "${task.title}".
+    const basePrompt = `You are working on task "${task.title}".
 Task description: ${task.description ?? "(none provided)"}.
 Repository URL: ${input.repoUrl ?? "(not supplied)"}.
 Constraints: ${(input.constraints ?? []).join("; ") || "None"}.
@@ -209,41 +209,67 @@ Deliver:
 - Log entries when meaningful work happens.
 - Status transitions via setStatus.
 - Use readFile/writeFile/listFiles/runCommand/gitDiff tools to inspect and modify the repository.
-- Final textual summary of progress, key diffs, and next steps.
+ - Final textual summary of progress, key diffs, and next steps. If you determine no code changes are needed, produce a detailed security assessment and documentation updates explaining why.
 
 Start by emitting an initial plan covering research, implementation, testing, and review.`;
 
-    const { text, finishReason } = await agent.generate({ prompt });
+    let latestSummary = "";
+    for (let attempt = 1; attempt <= 2; attempt += 1) {
+      const agent = createAgent();
+      if (attempt > 1) {
+        await updateStatus("executing", "Follow-up execution after empty diff");
+      }
 
-    const diff = await workspace.getDiff();
-    if (diff.trim()) {
-    await store.appendEvent(task.id, {
-      id: randomUUID(),
-      taskId: task.id,
-      type: "task.artifact_generated",
-      timestamp: Date.now(),
-      payload: {
-          artifactType: "git_diff",
-          diff,
-          workerId
-        }
-      });
+      const prompt =
+        attempt === 1
+          ? basePrompt
+          : `${basePrompt}
+
+The first pass finished without producing tangible artifacts. Perform a focused follow-up that delivers concrete documentation updates, security findings, or code changes. Avoid re-stating the original plan without additional action.`;
+
+      const { text, finishReason } = await agent.generate({ prompt });
+      latestSummary = text ?? "Agent finished without summary";
+
+      const diff = await workspace.getDiff();
+      if (diff.trim()) {
+        await store.appendEvent(task.id, {
+          id: randomUUID(),
+          taskId: task.id,
+          type: "task.artifact_generated",
+          timestamp: Date.now(),
+          payload: {
+            artifactType: "git_diff",
+            diff,
+            workerId
+          }
+        });
+
+        await store.appendEvent(task.id, {
+          id: randomUUID(),
+          taskId: task.id,
+          type: "task.completed",
+          timestamp: Date.now(),
+          payload: {
+            status: "completed",
+            summary: latestSummary,
+            finishReason,
+            workerId
+          }
+        });
+
+        return { success: true, summary: latestSummary } as const;
+      }
+
+      if (attempt === 1) {
+        await emitLog(
+          "warning",
+          "First pass produced no workspace changes; running a focused follow-up with stricter requirements."
+        );
+        await updateStatus("planning", "Revisiting approach after empty diff");
+      }
     }
 
-    await store.appendEvent(task.id, {
-      id: randomUUID(),
-      taskId: task.id,
-      type: "task.completed",
-      timestamp: Date.now(),
-      payload: {
-        status: "completed",
-        summary: text ?? "Agent finished without summary",
-        finishReason,
-        workerId
-      }
-    });
-
-    return { success: true, summary: text } as const;
+    throw new Error("Agent finished without producing workspace changes.");
   } finally {
     await workspace.cleanup();
   }
