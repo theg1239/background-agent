@@ -1,5 +1,6 @@
 "use server";
 
+import { randomUUID } from "node:crypto";
 import { applyPatch, parsePatch } from "diff";
 import { z } from "zod";
 import {
@@ -329,6 +330,42 @@ export async function createPullRequestAction(input: z.infer<typeof CreatePullRe
       error: (error as Error).message
     } as const;
   }
+}
+
+const FollowUpSchema = z.object({
+  taskId: z.string().min(1),
+  message: z.string().min(3)
+});
+
+export async function recordFollowUpAction(input: z.infer<typeof FollowUpSchema>) {
+  const parsed = FollowUpSchema.safeParse(input);
+  if (!parsed.success) {
+    const message = parsed.error.errors[0]?.message ?? "Invalid follow-up";
+    return { ok: false, error: message } as const;
+  }
+
+  const { taskId, message } = parsed.data;
+
+  await requireSessionId();
+
+  const task = await taskStore.getTask(taskId);
+  if (!task) {
+    return { ok: false, error: "Task not found." } as const;
+  }
+
+  const followUpEvent: TaskEvent = {
+    id: randomUUID(),
+    taskId,
+    type: "task.follow_up",
+    timestamp: Date.now(),
+    payload: {
+      message
+    }
+  };
+
+  await taskStore.appendEvent(taskId, followUpEvent);
+
+  return { ok: true } as const;
 }
 
 type GitTreeEntry = {

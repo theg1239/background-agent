@@ -37,6 +37,31 @@ export async function runTaskWithAgent({
 }: RunTaskOptions) {
   const workspace = await Workspace.prepare(task.id);
 
+  const broadcastFileUpdate = async (
+    path: string,
+    contents: string,
+    previous: string | null,
+    options?: { initial?: boolean; byteLength?: number }
+  ) => {
+    const bytes = options?.byteLength ?? Buffer.byteLength(contents, "utf8");
+    const fileEvent = {
+      id: randomUUID(),
+      taskId: task.id,
+      type: "task.file_updated",
+      timestamp: Date.now(),
+      payload: {
+        path,
+        contents,
+        previous,
+        bytes,
+        initial: options?.initial ?? false,
+        workerId
+      }
+    } satisfies TaskEvent;
+    await store.appendEvent(task.id, fileEvent);
+    await notifyTaskEvent?.(task.id, fileEvent);
+  };
+
   const emitLog = async (level: "info" | "warning" | "error", message: string) => {
     const event = {
       id: randomUUID(),
@@ -87,6 +112,86 @@ export async function runTaskWithAgent({
         branch: input.branch
       });
       await emitLog("info", "Repository clone complete");
+
+      const emitInitialWorkspaceSnapshot = async () => {
+        const MAX_SNAPSHOT_FILES = 30;
+        const MAX_SNAPSHOT_BYTES = 64_000;
+        const skipPatterns = [
+          /^node_modules\//,
+          /^\.git\//,
+          /^\.pnpm\//,
+          /^\.turbo\//,
+          /^dist\//,
+          /^build\//
+        ];
+        const skipExtensions = [
+          ".png",
+          ".jpg",
+          ".jpeg",
+          ".gif",
+          ".bmp",
+          ".ico",
+          ".webp",
+          ".svg",
+          ".pdf",
+          ".zip",
+          ".tar",
+          ".tgz",
+          ".gz"
+        ];
+
+        try {
+          const candidates = await workspace.listFiles(".", 600);
+          const files = candidates
+            .map((entry) => ({
+              raw: entry,
+              normalized: entry.replace(/\\/g, "/")
+            }))
+            .filter(({ raw }) => !raw.endsWith("/"))
+            .filter(({ normalized }) => !skipPatterns.some((pattern) => pattern.test(normalized)))
+            .filter(({ normalized }) =>
+              !skipExtensions.some((ext) => normalized.toLowerCase().endsWith(ext))
+            );
+
+          const selected = files.slice(0, MAX_SNAPSHOT_FILES);
+          let emitted = 0;
+
+          for (const { raw: rawPath, normalized: normalizedPath } of selected) {
+            try {
+              const contents = await workspace.readFile(rawPath);
+              const byteLength = Buffer.byteLength(contents, "utf8");
+              if (byteLength > MAX_SNAPSHOT_BYTES) {
+                await emitLog(
+                  "info",
+                  `Skipping initial snapshot for ${normalizedPath} (${byteLength} bytes exceeds limit)`
+                );
+                continue;
+              }
+              if (contents.includes("\u0000")) {
+                continue;
+              }
+              await broadcastFileUpdate(normalizedPath, contents, null, {
+                initial: true,
+                byteLength
+              });
+              emitted += 1;
+            } catch (error) {
+              await emitLog(
+                "warning",
+                `Unable to capture initial snapshot for ${normalizedPath}: ${(error as Error).message}`
+              );
+            }
+          }
+
+          if (emitted > 0) {
+            await emitLog("info", `Captured ${emitted} initial file snapshots.`);
+          }
+        } catch (error) {
+          await emitLog("warning", `Failed to enumerate repository files: ${(error as Error).message}`);
+        }
+      };
+
+      await emitInitialWorkspaceSnapshot();
     } else {
       await emitLog("info", "No repository URL provided; starting with empty workspace");
     }
@@ -190,21 +295,9 @@ export async function runTaskWithAgent({
             const result = await workspace.writeFile(path, contents);
             await emitLog("info", `Updated file ${path} (${result.bytes} bytes)`);
 
-            const fileEvent = {
-              id: randomUUID(),
-              taskId: task.id,
-              type: "task.file_updated",
-              timestamp: Date.now(),
-              payload: {
-                path,
-                contents,
-                previous: previousContents ?? null,
-                bytes: result.bytes,
-                workerId
-              }
-            } satisfies TaskEvent;
-            await store.appendEvent(task.id, fileEvent);
-            await notifyTaskEvent?.(task.id, fileEvent);
+            await broadcastFileUpdate(path, contents, previousContents ?? null, {
+              byteLength: result.bytes
+            });
 
             return result;
           }

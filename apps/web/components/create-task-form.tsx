@@ -9,16 +9,17 @@ interface CreateTaskFormProps {
   onCreated?: (task: Task, meta?: { optimisticId?: string; isOptimistic?: boolean }) => void;
   onFailed?: (optimisticId: string, error: string) => void;
   compact?: boolean;
+  helperText?: string | null;
 }
 
-export function CreateTaskForm({ onCreated, onFailed, compact = false }: CreateTaskFormProps) {
+export function CreateTaskForm({ onCreated, onFailed, compact = false, helperText }: CreateTaskFormProps) {
   const [title, setTitle] = useState("");
   const [description, setDescription] = useState("");
   const [repoUrl, setRepoUrl] = useState("");
   const [error, setError] = useState<string | null>(null);
   const [, startTransition] = useTransition();
   const [isSubmitting, setIsSubmitting] = useState(false);
-  const [buttonLabel, setButtonLabel] = useState("Send to agent");
+  const [buttonLabel, setButtonLabel] = useState("Run task");
 
   const formClassName = useMemo(
     () =>
@@ -58,7 +59,7 @@ export function CreateTaskForm({ onCreated, onFailed, compact = false }: CreateT
 
     onCreated?.(optimisticTask, { optimisticId, isOptimistic: true });
     setIsSubmitting(true);
-    setButtonLabel("Queued...");
+    setButtonLabel("Queued…");
 
     startTransition(() => {
       (async () => {
@@ -68,7 +69,7 @@ export function CreateTaskForm({ onCreated, onFailed, compact = false }: CreateT
           setError(message);
           onFailed?.(optimisticId, message);
           setIsSubmitting(false);
-          setButtonLabel("Send to agent");
+          setButtonLabel("Run task");
           return;
         }
 
@@ -77,25 +78,25 @@ export function CreateTaskForm({ onCreated, onFailed, compact = false }: CreateT
         setRepoUrl("");
         onCreated?.(result.task, { optimisticId, isOptimistic: false });
         setIsSubmitting(false);
-        setButtonLabel("Send to agent");
+        setButtonLabel("Run task");
       })().catch((actionError: unknown) => {
         const message = (actionError as Error).message ?? "Failed to create task";
         setError(message);
         onFailed?.(optimisticId, message);
         setIsSubmitting(false);
-        setButtonLabel("Send to agent");
+        setButtonLabel("Run task");
       });
     });
   };
 
-  const inputClass = "mt-2 w-full rounded-xl border border-neutral-800 bg-neutral-950 px-3 py-2 text-sm text-neutral-100 focus:border-neutral-600 focus:outline-none";
+  const inputClass =
+    "mt-2 w-full rounded-xl border border-neutral-800 bg-neutral-950 px-3 py-2 text-sm text-neutral-100 focus:border-neutral-600 focus:outline-none";
+  const helper = helperText ?? "Runs async; monitor messages for progress and review the diff once complete.";
 
   return (
     <form onSubmit={handleSubmit} className={formClassName}>
-      <div className={clsx("flex flex-col gap-4", compact && "sm:flex-row sm:items-end")}
-      >
-        <div className={clsx("flex-1", compact && "sm:max-w-xs")}
-        >
+      <div className={clsx("flex flex-col gap-4 md:flex-row md:items-end", compact && "md:items-start")}>
+        <div className={clsx("flex-1 min-w-0", compact && "md:w-1/3")}>
           <label className="text-xs font-medium uppercase tracking-[0.2em] text-neutral-500" htmlFor="title">
             Task title
           </label>
@@ -109,7 +110,7 @@ export function CreateTaskForm({ onCreated, onFailed, compact = false }: CreateT
             placeholder="Create onboarding checklist"
           />
         </div>
-        <div className="flex-1">
+        <div className="flex-1 min-w-0">
           <label className="text-xs font-medium uppercase tracking-[0.2em] text-neutral-500" htmlFor="repoUrl">
             Repository
           </label>
@@ -140,8 +141,8 @@ export function CreateTaskForm({ onCreated, onFailed, compact = false }: CreateT
         />
       </div>
       {error ? <p className="mt-2 text-sm text-red-400">{error}</p> : null}
-      <div className="mt-4 flex items-center justify-between gap-3">
-        <p className="hidden text-xs text-neutral-500 sm:block">The agent queues instantly and streams progress as it works.</p>
+      <div className="mt-4 flex flex-wrap items-center justify-between gap-3">
+        {helper ? <p className="text-xs text-neutral-500">{helper}</p> : <span />}
         <button
           type="submit"
           disabled={isSubmitting}

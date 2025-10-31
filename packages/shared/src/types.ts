@@ -30,6 +30,7 @@ export const TaskEventTypeSchema = z.enum([
   "task.approval_resolved",
   "task.artifact_generated",
   "task.file_updated",
+  "task.follow_up",
   "plan.updated",
   "plan.step_started",
   "plan.step_completed",
