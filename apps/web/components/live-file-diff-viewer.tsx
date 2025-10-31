@@ -33,6 +33,8 @@ export type LiveFileUpdate = {
   contents: string;
   previous: string | null | undefined;
   timestamp: number;
+  isInitialSnapshot?: boolean;
+  isNewFile?: boolean;
 };
 
 type Props = {
@@ -149,7 +151,7 @@ export function LiveFileDiffViewer({ updates, className, onReviewDiff }: Props) 
     };
 
     for (const update of latestUpdates.values()) {
-      const stats = computeDiffStats(update.previous ?? "", update.contents);
+      const stats = computeDiffStats(update.previous ?? "", update.contents ?? "");
       const segments = update.path.split("/").filter(Boolean);
 
       let current = root;
@@ -234,7 +236,12 @@ export function LiveFileDiffViewer({ updates, className, onReviewDiff }: Props) 
             <span className="truncate">
               {activePath ?? (tree.length ? "Choose a file" : "Waiting for edits…")}
             </span>
-            {activeUpdate?.previous === null ? (
+            {activeUpdate?.isInitialSnapshot ? (
+              <span className="whitespace-nowrap rounded-full border border-neutral-600/60 bg-neutral-500/10 px-2 py-[1px] text-[10px] uppercase tracking-widest text-neutral-200">
+                Baseline snapshot
+              </span>
+            ) : null}
+            {activeUpdate?.isNewFile ? (
               <span className="whitespace-nowrap rounded-full border border-emerald-600/60 bg-emerald-500/10 px-2 py-[1px] text-[10px] uppercase tracking-widest text-emerald-200">
                 New file
               </span>
@@ -309,7 +316,7 @@ export function LiveFileDiffViewer({ updates, className, onReviewDiff }: Props) 
               theme="vs-dark"
               language={inferMonacoLanguage(activeUpdate.path)}
               original={activeUpdate.previous ?? ""}
-              modified={activeUpdate.contents}
+              modified={activeUpdate.contents ?? ""}
               options={{
                 readOnly: true,
                 renderSideBySide: true,
@@ -339,7 +346,7 @@ export function LiveFileDiffViewer({ updates, className, onReviewDiff }: Props) 
           />
           <div className="relative h-[70vh] w-full max-w-sm overflow-hidden rounded-3xl border border-neutral-800 bg-neutral-950/95">
             <div className="flex items-center justify-between border-b border-neutral-800 px-4 py-3 text-sm text-neutral-200">
-              <span>Modified files</span>
+              <span>Workspace files</span>
               <button
                 type="button"
                 onClick={() => setShowMobileTree(false)}
@@ -408,7 +415,7 @@ interface FileTreeProps {
 
 function FileTree({ nodes, activePath, openDirs, onToggleDir, onSelectFile }: FileTreeProps) {
   if (!nodes.length) {
-    return <p className="px-2 text-xs text-neutral-500">No modified files yet.</p>;
+    return <p className="px-2 text-xs text-neutral-500">No workspace files available yet.</p>;
   }
 
   return (

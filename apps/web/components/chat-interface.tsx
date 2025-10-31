@@ -117,29 +117,65 @@ export function ChatInterface({ initialTasks, initialGitHubAuth }: ChatInterface
   const liveFileUpdates = useMemo<LiveFileUpdate[]>(() => {
     if (!events.length) return [];
     const updates: LiveFileUpdate[] = [];
+    const baselineByPath = new Map<string, string>();
+    const newFileByPath = new Map<string, boolean>();
+
     for (const event of events) {
       if (event.type !== "task.file_updated") continue;
       const rawPath = typeof event.payload?.path === "string" ? event.payload.path : undefined;
       if (!rawPath) continue;
       const normalizedPath = rawPath.replace(/\\/g, "/");
       if (normalizedPath.startsWith(".git/")) continue;
-      if (event.payload?.initial === true) continue;
+
       const contents = typeof event.payload?.contents === "string" ? event.payload.contents : "";
+      const isInitialSnapshot = event.payload?.initial === true;
+
+      if (isInitialSnapshot) {
+        baselineByPath.set(normalizedPath, contents);
+        newFileByPath.set(normalizedPath, false);
+        updates.push({
+          id: event.id,
+          path: normalizedPath,
+          contents,
+          previous: contents,
+          timestamp: event.timestamp,
+          isInitialSnapshot: true,
+          isNewFile: false
+        });
+        continue;
+      }
+
       const previousPayload = event.payload?.previous;
-      const previous =
-        typeof previousPayload === "string"
-          ? previousPayload
-          : previousPayload === null
-          ? null
-          : undefined;
+      let previousContents: string;
+      let wasNewFile = newFileByPath.get(normalizedPath) ?? false;
+
+      if (typeof previousPayload === "string") {
+        previousContents = previousPayload;
+        if (!baselineByPath.has(normalizedPath)) {
+          baselineByPath.set(normalizedPath, previousPayload);
+        }
+      } else if (previousPayload === null) {
+        previousContents = baselineByPath.get(normalizedPath) ?? "";
+        wasNewFile = true;
+        if (!baselineByPath.has(normalizedPath)) {
+          baselineByPath.set(normalizedPath, "");
+        }
+      } else {
+        previousContents = baselineByPath.get(normalizedPath) ?? "";
+      }
+
+      newFileByPath.set(normalizedPath, wasNewFile);
+
       updates.push({
         id: event.id,
         path: normalizedPath,
         contents,
-        previous,
-        timestamp: event.timestamp
+        previous: previousContents,
+        timestamp: event.timestamp,
+        isNewFile: wasNewFile
       });
     }
+
     return updates;
   }, [events]);
 
@@ -1105,12 +1141,25 @@ function formatEvent(event: TaskEvent): DisplayEvent {
       const path = typeof event.payload?.path === "string" ? event.payload.path : "unknown file";
       const bytes =
         typeof event.payload?.bytes === "number" ? `${event.payload.bytes} bytes written` : undefined;
+      const workerId = typeof event.payload?.workerId === "string" ? event.payload.workerId : undefined;
+      const isInitial = event.payload?.initial === true;
+      const isCreation = !isInitial && event.payload?.previous === null;
+      const label = isInitial ? "File snapshot" : isCreation ? "File added" : "File updated";
+      const body = isInitial
+        ? `Captured baseline for ${path}.`
+        : isCreation
+        ? `Created ${path}.`
+        : `Updated ${path}.`;
+      const detailParts: string[] = [];
+      if (bytes) detailParts.push(bytes);
+      if (workerId) detailParts.push(`worker ${workerId.slice(0, 6)}`);
+      const detail = detailParts.length ? detailParts.join(" | ") : undefined;
       return {
         ...base,
-        label: "File updated",
-        body: `Agent modified ${path}.`,
-        detail: bytes,
-        tone: "agent"
+        label,
+        body,
+        detail,
+        tone: isInitial ? "system" : "agent"
       };
     }
     default: {
