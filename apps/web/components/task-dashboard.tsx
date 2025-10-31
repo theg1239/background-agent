@@ -3,8 +3,8 @@
 import useSWR from "swr";
 import { useState } from "react";
 import { Task, TaskEventStreamSnapshot } from "@background-agent/shared";
-import { jsonFetcher } from "@/lib/utils/fetcher";
-import { useTaskEvents } from "@/hooks/use-task-events";
+import { jsonFetcher } from "../lib/utils/fetcher";
+import { useTaskEvents } from "../hooks/use-task-events";
 import { TaskList } from "./task-list";
 import { TaskDetail } from "./task-detail";
 import { CreateTaskForm } from "./create-task-form";
