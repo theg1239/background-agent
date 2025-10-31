@@ -1,4 +1,4 @@
-import { TaskStore } from "@background-agent/shared/task-store";
+import { TaskStore } from "@background-agent/shared";
 import type { TaskEventType } from "@background-agent/shared";
 import { redis } from "./redis";
 
