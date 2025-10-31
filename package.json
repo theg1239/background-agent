@@ -1,0 +1,15 @@
+{
+  "name": "background-agent",
+  "private": true,
+  "packageManager": "pnpm@9.6.0",
+  "workspaces": [
+    "apps/*",
+    "packages/*"
+  ],
+  "scripts": {
+    "dev:web": "pnpm --filter web dev",
+    "build:web": "pnpm --filter web build",
+    "dev:worker": "pnpm --filter worker dev",
+    "build:worker": "pnpm --filter worker build"
+  }
+}
