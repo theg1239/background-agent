@@ -2,10 +2,15 @@ import { randomUUID } from "node:crypto";
 import { ToolLoopAgent, stepCountIs, tool } from "ai";
 import type { LanguageModel } from "ai";
 import { z } from "zod";
-import { createGoogleGenerativeAI } from "@ai-sdk/google";
 import type { CreateTaskInput, Task, TaskPlanStep } from "@background-agent/shared";
 import { TaskStatusSchema, TaskStore } from "@background-agent/shared";
 import { config } from "./config";
+import {
+  acquireGeminiModel,
+  GeminiKeysUnavailableError,
+  reportGeminiFailure,
+  reportGeminiSuccess
+} from "./gemini";
 import { Workspace } from "./workspace";
 
 interface RunTaskOptions {
@@ -15,7 +20,10 @@ interface RunTaskOptions {
   store: TaskStore;
 }
 
-const google = createGoogleGenerativeAI({ apiKey: config.geminiApiKey });
+const MODEL_NAME = "gemini-2.5-flash";
+const MAX_GEMINI_ATTEMPTS = Math.max(config.geminiApiKeys.length * 5, 5);
+const MAX_GEMINI_WAIT_MS = 5 * 60_000;
+const delay = (ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms));
 
 export async function runTaskWithAgent({ workerId, task, input, store }: RunTaskOptions) {
   const workspace = await Workspace.prepare(task.id);
@@ -71,11 +79,9 @@ export async function runTaskWithAgent({ workerId, task, input, store }: RunTask
       await emitLog("info", "No repository URL provided; starting with empty workspace");
     }
 
-    const model = google("gemini-2.5-flash");
-
-    const createAgent = () =>
+    const buildAgent = (languageModel: LanguageModel) =>
       new ToolLoopAgent({
-        model: model as unknown as LanguageModel,
+        model: languageModel,
         instructions: `You are an autonomous senior software engineer inside a background task runner.
 - Always maintain an explicit execution plan.
 - Use the provided tools to update the plan, log progress, change task status, and work with the repository.
@@ -213,9 +219,73 @@ Deliver:
 
 Start by emitting an initial plan covering research, implementation, testing, and review.`;
 
+    const generateWithGemini = async (prompt: string) => {
+      let attempts = 0;
+      let totalWaitMs = 0;
+      let lastError: unknown;
+
+      while (attempts < MAX_GEMINI_ATTEMPTS) {
+        let handle;
+        try {
+          handle = acquireGeminiModel(MODEL_NAME);
+        } catch (error) {
+          if (error instanceof GeminiKeysUnavailableError) {
+            if (totalWaitMs >= MAX_GEMINI_WAIT_MS) {
+              throw new Error(
+                `Gemini API keys remained rate limited for ${Math.ceil(totalWaitMs / 1000)}s.`
+              );
+            }
+
+            const remainingBudget = Math.max(MAX_GEMINI_WAIT_MS - totalWaitMs, 0);
+            const waitMs = Math.min(error.retryAfterMs, Math.max(remainingBudget, 1_000));
+            totalWaitMs += waitMs;
+
+            await emitLog(
+              "warning",
+              `All Gemini API keys are rate limited; waiting ${Math.ceil(
+                waitMs / 1000
+              )}s before retrying.`
+            );
+            await delay(waitMs);
+            continue;
+          }
+          throw error;
+        }
+
+        attempts += 1;
+        const agent = buildAgent(handle.model as unknown as LanguageModel);
+        try {
+          const result = await agent.generate({ prompt });
+          reportGeminiSuccess(handle);
+          return result;
+        } catch (error) {
+          lastError = error;
+          const outcome = reportGeminiFailure(handle, error);
+
+          if (outcome.retryable) {
+            const retrySeconds = Math.ceil((outcome.retryAfterMs ?? 30_000) / 1000);
+            await emitLog(
+              "warning",
+              `Gemini ${handle.label} (${handle.mask}) hit a rate limit. Backing off this key for ${retrySeconds}s and rotating to the next key.`
+            );
+            continue;
+          }
+
+          throw error;
+        }
+      }
+
+      const message =
+        lastError instanceof Error
+          ? `Failed to call Gemini after ${attempts} rotated attempts. Last error: ${lastError.message}`
+          : `Failed to call Gemini after ${attempts} rotated attempts.`;
+
+      await emitLog("error", message);
+      throw lastError instanceof Error ? lastError : new Error(message);
+    };
+
     let latestSummary = "";
     for (let attempt = 1; attempt <= 2; attempt += 1) {
-      const agent = createAgent();
       if (attempt > 1) {
         await updateStatus("executing", "Follow-up execution after empty diff");
       }
@@ -227,7 +297,7 @@ Start by emitting an initial plan covering research, implementation, testing, an
 
 The first pass finished without producing tangible artifacts. Perform a focused follow-up that delivers concrete documentation updates, security findings, or code changes. Avoid re-stating the original plan without additional action.`;
 
-      const { text, finishReason } = await agent.generate({ prompt });
+      const { text, finishReason } = await generateWithGemini(prompt);
       latestSummary = text ?? "Agent finished without summary";
 
       const diff = await workspace.getDiff();

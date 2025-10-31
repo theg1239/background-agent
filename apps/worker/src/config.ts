@@ -1,10 +1,20 @@
 import "dotenv/config";
 
-function required(name: string, value: string | undefined): string {
-  if (!value) {
+function requiredList(name: string, raw: string | undefined): string[] {
+  if (!raw) {
     throw new Error(`Missing required environment variable: ${name}`);
   }
-  return value;
+
+  const values = raw
+    .split(/[, \n\r\t]+/)
+    .map((value) => value.trim())
+    .filter((value) => value.length > 0);
+
+  if (values.length === 0) {
+    throw new Error(`Environment variable ${name} must include at least one API key.`);
+  }
+
+  return values;
 }
 
 function resolveRedisUrl() {
@@ -23,8 +33,8 @@ export const config = {
   redisUrl: resolveRedisUrl(),
   pollIntervalMs: Number(process.env.QUEUE_POLL_INTERVAL_MS ?? "1000"),
   maxConcurrentTasks: Number(process.env.WORKER_MAX_CONCURRENCY ?? "2"),
-  geminiApiKey: required(
-    "GOOGLE_GENERATIVE_AI_API_KEY",
-    process.env.GOOGLE_GENERATIVE_AI_API_KEY
+  geminiApiKeys: requiredList(
+    "GOOGLE_GENERATIVE_AI_API_KEYS or GOOGLE_GENERATIVE_AI_API_KEY",
+    process.env.GOOGLE_GENERATIVE_AI_API_KEYS ?? process.env.GOOGLE_GENERATIVE_AI_API_KEY
   )
 };
