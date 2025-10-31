@@ -178,8 +178,34 @@ export async function runTaskWithAgent({
             contents: z.string()
           }),
           execute: async ({ path, contents }) => {
+            let previousContents: string | undefined;
+            try {
+              previousContents = await workspace.readFile(path);
+            } catch (error) {
+              if ((error as NodeJS.ErrnoException).code !== "ENOENT") {
+                await emitLog("warning", `Failed to read existing contents of ${path}: ${(error as Error).message}`);
+              }
+            }
+
             const result = await workspace.writeFile(path, contents);
             await emitLog("info", `Updated file ${path} (${result.bytes} bytes)`);
+
+            const fileEvent = {
+              id: randomUUID(),
+              taskId: task.id,
+              type: "task.file_updated",
+              timestamp: Date.now(),
+              payload: {
+                path,
+                contents,
+                previous: previousContents ?? null,
+                bytes: result.bytes,
+                workerId
+              }
+            } satisfies TaskEvent;
+            await store.appendEvent(task.id, fileEvent);
+            await notifyTaskEvent?.(task.id, fileEvent);
+
             return result;
           }
         }),

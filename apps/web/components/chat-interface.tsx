@@ -7,6 +7,7 @@ import { useTaskEvents } from "../hooks/use-task-events";
 import { CreateTaskForm } from "./create-task-form";
 import { useTaskIndex } from "../hooks/use-task-index";
 import { DiffArtifactCard } from "./diff-artifact-card";
+import { LiveFileDiffViewer, type LiveFileUpdate } from "./live-file-diff-viewer";
 import type { GitHubAuthState } from "../lib/server/github-auth";
 
 interface ChatInterfaceProps {
@@ -36,6 +37,34 @@ export function ChatInterface({ initialTasks, initialGitHubAuth }: ChatInterface
   }, [tasks, activeTaskId]);
 
   const { task, events, isConnected } = useTaskEvents(activeTaskId);
+
+  const liveFileUpdates = useMemo<LiveFileUpdate[]>(() => {
+    if (!events.length) {
+      return [];
+    }
+    const updates: LiveFileUpdate[] = [];
+    for (const event of events) {
+      if (event.type !== "task.file_updated") continue;
+      const path = typeof event.payload?.path === "string" ? event.payload.path : undefined;
+      if (!path) continue;
+      const contents = typeof event.payload?.contents === "string" ? event.payload.contents : "";
+      const previousPayload = event.payload?.previous;
+      const previous =
+        typeof previousPayload === "string"
+          ? previousPayload
+          : previousPayload === null
+          ? null
+          : undefined;
+      updates.push({
+        id: event.id,
+        path,
+        contents,
+        previous,
+        timestamp: event.timestamp
+      });
+    }
+    return updates;
+  }, [events]);
 
   const resolvedTask = task ?? activeTask;
 
@@ -193,6 +222,7 @@ export function ChatInterface({ initialTasks, initialGitHubAuth }: ChatInterface
         </div>
 
         <div className="chat-font flex-1 space-y-3 overflow-y-auto px-5 pb-6 pt-4 text-sm text-neutral-100">
+          {liveFileUpdates.length ? <LiveFileDiffViewer updates={liveFileUpdates} /> : null}
           {displayedEvents.map((event) => (
             <div
               key={`${event.id}-${event.timestamp}`}
@@ -378,6 +408,18 @@ function formatEvent(event: TaskEvent): DisplayEvent {
         artifactType,
         diff,
         eventId: event.id
+      };
+    }
+    case "task.file_updated": {
+      const path = typeof event.payload?.path === "string" ? event.payload.path : "unknown file";
+      const bytes =
+        typeof event.payload?.bytes === "number" ? `${event.payload.bytes} bytes written` : undefined;
+      return {
+        ...base,
+        label: "File updated",
+        body: `Agent modified ${path}.`,
+        detail: bytes,
+        tone: "agent"
       };
     }
     default: {
