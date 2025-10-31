@@ -30,17 +30,17 @@ export function TaskList({ tasks, activeTaskId, onSelectTask }: Props) {
               className={clsx(
                 "flex w-full items-start justify-between rounded-xl border px-4 py-3 text-left transition",
                 isActive
-                  ? "border-blue-500/80 bg-blue-500/10 shadow"
-                  : "border-zinc-800/80 bg-zinc-950/60 hover:border-zinc-700"
+                  ? "border-white/30 bg-neutral-900 shadow"
+                  : "border-neutral-800 bg-neutral-950 hover:border-neutral-700"
               )}
             >
               <div>
-                <p className="text-sm font-semibold text-zinc-100">{task.title}</p>
+                <p className="text-sm font-semibold text-white">{task.title}</p>
                 {task.description ? (
-                  <p className="mt-1 text-xs text-zinc-400">{task.description}</p>
+                  <p className="mt-1 text-xs text-neutral-400">{task.description}</p>
                 ) : null}
               </div>
-              <span className="ml-4 rounded-full bg-zinc-800 px-3 py-1 text-xs font-medium uppercase tracking-wide text-zinc-200">
+              <span className="ml-4 rounded-full bg-neutral-800 px-3 py-1 text-xs font-medium uppercase tracking-wide text-neutral-200">
                 {task.status}
               </span>
             </button>

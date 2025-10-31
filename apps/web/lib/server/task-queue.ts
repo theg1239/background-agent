@@ -28,7 +28,7 @@ class TaskQueue {
     await this.requeueLeases();
 
     while (true) {
-      const taskId = (await this.redis.lpop(QUEUE_KEY)) as string | null;
+      const taskId = await this.redis.lpop<string>(QUEUE_KEY);
       if (!taskId) {
         return undefined;
       }
@@ -45,7 +45,7 @@ class TaskQueue {
         continue;
       }
 
-      await this.redis.zadd(LEASE_ZSET_KEY, { score: now + LEASE_MS, member: taskId });
+      await this.redis.zadd(LEASE_ZSET_KEY, now + LEASE_MS, taskId);
 
       const record = await taskStore.getTaskForWorker(taskId);
       if (!record) {
@@ -73,9 +73,7 @@ class TaskQueue {
 
   async requeueLeases() {
     const now = Date.now();
-    const expiredTaskIds = (await this.redis.zrange(LEASE_ZSET_KEY, 0, now, {
-      byscore: true
-    })) as string[];
+    const expiredTaskIds = await this.redis.zrangebyscore(LEASE_ZSET_KEY, "-inf", now);
     if (expiredTaskIds.length === 0) return;
 
     for (const taskId of expiredTaskIds) {

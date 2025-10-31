@@ -3,12 +3,14 @@ import { taskStore } from "@/lib/server/task-store";
 
 export async function GET(
   _request: Request,
-  { params }: { params: { taskId: string } }
+  context: { params: Promise<{ taskId: string }> }
 ) {
-  const task = await taskStore.getTask(params.taskId);
+  const { taskId } = await context.params;
+
+  const task = await taskStore.getTask(taskId);
   if (!task) {
     return NextResponse.json({ error: "Task not found" }, { status: 404 });
   }
-  const snapshot = await taskStore.getEventStreamSnapshot(params.taskId);
+  const snapshot = await taskStore.getEventStreamSnapshot(taskId);
   return NextResponse.json(snapshot ?? { task, events: [] });
 }

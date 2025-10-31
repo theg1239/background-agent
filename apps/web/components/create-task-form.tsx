@@ -48,9 +48,12 @@ export function CreateTaskForm({ onCreated }: { onCreated?: (task: Task) => void
   };
 
   return (
-    <form onSubmit={handleSubmit} className="space-y-4 rounded-xl border border-zinc-800/80 bg-zinc-950/60 p-4 shadow-lg">
+    <form
+      onSubmit={handleSubmit}
+      className="space-y-4 rounded-xl border border-neutral-800 bg-neutral-900/80 p-4 shadow-lg"
+    >
       <div>
-        <label className="block text-sm font-medium text-zinc-300" htmlFor="title">
+        <label className="block text-sm font-medium text-neutral-200" htmlFor="title">
           Task title
         </label>
         <input
@@ -59,12 +62,12 @@ export function CreateTaskForm({ onCreated }: { onCreated?: (task: Task) => void
           required
           value={title}
           onChange={(event) => setTitle(event.target.value)}
-          className="mt-1 w-full rounded-lg border border-zinc-700 bg-zinc-900 px-3 py-2 text-sm text-zinc-100 focus:border-blue-500 focus:outline-none"
+          className="mt-1 w-full rounded-lg border border-neutral-800 bg-neutral-950 px-3 py-2 text-sm text-neutral-100 focus:border-neutral-600 focus:outline-none"
           placeholder="Implement background coding agent MVP"
         />
       </div>
       <div>
-        <label className="block text-sm font-medium text-zinc-300" htmlFor="description">
+        <label className="block text-sm font-medium text-neutral-200" htmlFor="description">
           Description
         </label>
         <textarea
@@ -72,12 +75,12 @@ export function CreateTaskForm({ onCreated }: { onCreated?: (task: Task) => void
           rows={3}
           value={description}
           onChange={(event) => setDescription(event.target.value)}
-          className="mt-1 w-full rounded-lg border border-zinc-700 bg-zinc-900 px-3 py-2 text-sm text-zinc-100 focus:border-blue-500 focus:outline-none"
+          className="mt-1 w-full rounded-lg border border-neutral-800 bg-neutral-950 px-3 py-2 text-sm text-neutral-100 focus:border-neutral-600 focus:outline-none"
           placeholder="List acceptance criteria, repositories, and constraints"
         />
       </div>
       <div>
-        <label className="block text-sm font-medium text-zinc-300" htmlFor="repoUrl">
+        <label className="block text-sm font-medium text-neutral-200" htmlFor="repoUrl">
           Repository URL
         </label>
         <input
@@ -85,7 +88,7 @@ export function CreateTaskForm({ onCreated }: { onCreated?: (task: Task) => void
           type="url"
           value={repoUrl}
           onChange={(event) => setRepoUrl(event.target.value)}
-          className="mt-1 w-full rounded-lg border border-zinc-700 bg-zinc-900 px-3 py-2 text-sm text-zinc-100 focus:border-blue-500 focus:outline-none"
+          className="mt-1 w-full rounded-lg border border-neutral-800 bg-neutral-950 px-3 py-2 text-sm text-neutral-100 focus:border-neutral-600 focus:outline-none"
           placeholder="https://github.com/acme/awesome-repo"
         />
       </div>
@@ -93,7 +96,7 @@ export function CreateTaskForm({ onCreated }: { onCreated?: (task: Task) => void
       <button
         type="submit"
         disabled={isMutating}
-        className="w-full rounded-lg bg-blue-500 px-4 py-2 text-sm font-semibold text-white transition hover:bg-blue-400 disabled:cursor-not-allowed disabled:bg-blue-900"
+        className="w-full rounded-lg bg-white px-4 py-2 text-sm font-semibold text-black transition hover:bg-neutral-200 disabled:cursor-not-allowed disabled:bg-neutral-800 disabled:text-neutral-400"
       >
         {isMutating ? "Creating..." : "Create task"}
       </button>

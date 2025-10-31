@@ -6,9 +6,9 @@ export const dynamic = "force-dynamic";
 
 export async function GET(
   request: NextRequest,
-  { params }: { params: { taskId: string } }
+  context: { params: Promise<{ taskId: string }> }
 ) {
-  const { taskId } = params;
+  const { taskId } = await context.params;
   const snapshot = await taskStore.getEventStreamSnapshot(taskId);
   if (!snapshot) {
     return new NextResponse(null, { status: 404 });

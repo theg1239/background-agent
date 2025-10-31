@@ -5,8 +5,10 @@ import { assertInternalRequest } from "@/lib/server/internal-auth";
 
 export async function POST(
   request: NextRequest,
-  { params }: { params: { taskId: string } }
+  context: { params: Promise<{ taskId: string }> }
 ) {
+  const { taskId } = await context.params;
+
   try {
     assertInternalRequest(request);
   } catch (error) {
@@ -17,10 +19,10 @@ export async function POST(
   const requeue = Boolean(body?.requeue);
 
   if (requeue) {
-    await taskQueue.requeue(params.taskId);
-    await taskStore.updateStatus(params.taskId, "queued");
+    await taskQueue.requeue(taskId);
+    await taskStore.updateStatus(taskId, "queued");
   } else {
-    await taskQueue.ack(params.taskId);
+    await taskQueue.ack(taskId);
   }
 
   return NextResponse.json({ ok: true });

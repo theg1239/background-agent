@@ -23,8 +23,7 @@ Create `.env.local` (never commit secrets):
 
 ```bash
 TASK_API_TOKEN="local-dev-token"        # Optional; set to enforce auth for internal routes
-UPSTASH_REDIS_REST_URL="https://..."    # Upstash Redis REST URL
-UPSTASH_REDIS_REST_TOKEN="..."          # Upstash Redis REST token
+UPSTASH_REDIS_URL="rediss://default:<token>@host:6379"  # Upstash Redis TLS URL
 ```
 
 When deploying to Vercel, set `TASK_API_TOKEN` in the project settings so internal API endpoints require bearer auth from workers.
@@ -37,6 +36,7 @@ Create `.env` with:
 TASK_API_BASE_URL="https://your-vercel-deployment.vercel.app"
 TASK_API_TOKEN="local-dev-token"
 GOOGLE_GENERATIVE_AI_API_KEY="..."
+UPSTASH_REDIS_URL="rediss://default:<token>@host:6379"
 QUEUE_POLL_INTERVAL_MS=2500            # optional
 WORKER_MAX_CONCURRENCY=2               # optional
 WORKER_ID="dev-worker-1"              # optional

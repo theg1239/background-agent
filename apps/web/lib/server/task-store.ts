@@ -174,12 +174,9 @@ class TaskRepository {
   }
 
   private async persistEvent(record: TaskRecord, event: TaskEvent) {
-    const streamId = await this.redis.xadd(
-      this.eventsStreamKey(record.id),
-      "*",
-      { event: JSON.stringify(event) },
-      { trim: { strategy: "maxlen", threshold: 2000 } }
-    );
+    const streamKey = this.eventsStreamKey(record.id);
+    const streamId = await this.redis.xadd(streamKey, "*", "event", JSON.stringify(event));
+    await this.redis.xtrim(streamKey, "MAXLEN", "~", 2000);
 
     record.latestStreamId = streamId;
 
@@ -222,10 +219,17 @@ class TaskRepository {
     lastSeenId: string,
     { blockMs = 5_000, count = 20 }: { blockMs?: number; count?: number }
   ): Promise<{ events: TaskEvent[]; cursor: string } | undefined> {
-    const responses = await this.redis.xread<TaskEvent>(
-      [{ key: this.eventsStreamKey(taskId), id: lastSeenId }],
-      { block: blockMs, count }
+    const raw = await this.redis.xread(
+      "BLOCK",
+      blockMs,
+      "COUNT",
+      count,
+      "STREAMS",
+      this.eventsStreamKey(taskId),
+      lastSeenId
     );
+
+    const responses = raw as [string, [string, Record<string, string>][]][] | null;
 
     if (!responses || responses.length === 0) {
       return undefined;

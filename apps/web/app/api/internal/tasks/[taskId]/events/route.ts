@@ -5,8 +5,10 @@ import { assertInternalRequest } from "@/lib/server/internal-auth";
 
 export async function POST(
   request: NextRequest,
-  { params }: { params: { taskId: string } }
+  context: { params: Promise<{ taskId: string }> }
 ) {
+  const { taskId } = await context.params;
+
   try {
     assertInternalRequest(request);
   } catch (error) {
@@ -20,7 +22,7 @@ export async function POST(
   }
 
   try {
-    await taskStore.appendEvent(params.taskId, parsed.data);
+    await taskStore.appendEvent(taskId, parsed.data);
     return NextResponse.json({ ok: true }, { status: 201 });
   } catch (error) {
     return NextResponse.json({ error: (error as Error).message }, { status: 404 });
