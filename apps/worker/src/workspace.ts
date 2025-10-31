@@ -113,18 +113,79 @@ export class Workspace {
 
   async getDiff() {
     try {
-      const status = await execFile("git", ["status", "--porcelain"], {
+      const status = await execFile("git", ["status", "--porcelain=v1", "-z"], {
         cwd: this.root,
         maxBuffer: 10 * 1024 * 1024
       });
-      if (!status.stdout.trim()) {
+
+      const statusEntries = status.stdout
+        .split("\0")
+        .map((entry) => entry.replace(/\r$/, ""))
+        .filter((entry) => entry.length > 0);
+
+      if (statusEntries.length === 0) {
         return "";
       }
-      const diff = await execFile("git", ["diff"], {
+
+      const untrackedFiles: string[] = [];
+      for (let index = 0; index < statusEntries.length; index += 1) {
+        const entry = statusEntries[index];
+        if (entry.length < 3) {
+          continue;
+        }
+        const code = entry.slice(0, 2);
+        let filePath = entry.slice(3);
+        if ((code.startsWith("R") || code.startsWith("C")) && index + 1 < statusEntries.length) {
+          filePath = statusEntries[index + 1];
+          index += 1;
+        }
+        if (code === "??") {
+          if (filePath) {
+            untrackedFiles.push(filePath);
+          }
+        }
+      }
+
+      const diffs: string[] = [];
+
+      const staged = await execFile("git", ["diff", "--cached"], {
         cwd: this.root,
         maxBuffer: 10 * 1024 * 1024
       });
-      return diff.stdout;
+      if (staged.stdout.trim()) {
+        diffs.push(staged.stdout);
+      }
+
+      const unstaged = await execFile("git", ["diff"], {
+        cwd: this.root,
+        maxBuffer: 10 * 1024 * 1024
+      });
+      if (unstaged.stdout.trim()) {
+        diffs.push(unstaged.stdout);
+      }
+
+      for (const relativePath of untrackedFiles) {
+        try {
+          const { stdout } = await execFile(
+            "git",
+            ["diff", "--no-index", "--", "/dev/null", relativePath],
+            {
+              cwd: this.root,
+              maxBuffer: 10 * 1024 * 1024
+            }
+          );
+          if (stdout.trim()) {
+            diffs.push(stdout);
+          }
+        } catch (error) {
+          const err = error as Error & { stdout?: string };
+          if (err.stdout?.trim()) {
+            diffs.push(err.stdout);
+          }
+        }
+      }
+
+      return diffs.join("\n");
     } catch (error) {
       return "";
     }

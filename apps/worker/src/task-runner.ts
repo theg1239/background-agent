@@ -2,7 +2,7 @@ import { randomUUID } from "node:crypto";
 import { ToolLoopAgent, stepCountIs, tool } from "ai";
 import type { LanguageModel } from "ai";
 import { z } from "zod";
-import type { CreateTaskInput, Task, TaskPlanStep } from "@background-agent/shared";
+import type { CreateTaskInput, Task, TaskEvent, TaskPlanStep } from "@background-agent/shared";
 import { TaskStatusSchema, TaskStore } from "@background-agent/shared";
 import { config } from "./config";
 import {
@@ -18,6 +18,8 @@ interface RunTaskOptions {
   task: Task;
   input: CreateTaskInput;
   store: TaskStore;
+  notifyTaskUpdate?: (taskId: string) => Promise<void>;
+  notifyTaskEvent?: (taskId: string, event: TaskEvent) => Promise<void>;
 }
 
 const MODEL_NAME = "gemini-2.5-flash";
@@ -25,17 +27,26 @@ const MAX_GEMINI_ATTEMPTS = Math.max(config.geminiApiKeys.length * 5, 5);
 const MAX_GEMINI_WAIT_MS = 5 * 60_000;
 const delay = (ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms));
 
-export async function runTaskWithAgent({ workerId, task, input, store }: RunTaskOptions) {
+export async function runTaskWithAgent({
+  workerId,
+  task,
+  input,
+  store,
+  notifyTaskUpdate,
+  notifyTaskEvent
+}: RunTaskOptions) {
   const workspace = await Workspace.prepare(task.id);
 
   const emitLog = async (level: "info" | "warning" | "error", message: string) => {
-    await store.appendEvent(task.id, {
+    const event = {
       id: randomUUID(),
       taskId: task.id,
       type: "log.entry",
       timestamp: Date.now(),
       payload: { level, message, workerId }
-    });
+    } satisfies TaskEvent;
+    await store.appendEvent(task.id, event);
+    await notifyTaskEvent?.(task.id, event);
   };
 
   const normalizeSteps = (
@@ -64,6 +75,7 @@ export async function runTaskWithAgent({ workerId, task, input, store }: RunTask
     }
 
     await store.updateStatus(task.id, parsed.data, { reason, workerId });
+    await notifyTaskUpdate?.(task.id);
   };
 
   try {
@@ -112,16 +124,18 @@ export async function runTaskWithAgent({ workerId, task, input, store }: RunTask
                 status: step.status ?? "pending"
               }))
             );
-            await store.appendEvent(task.id, {
-              id: randomUUID(),
-              taskId: task.id,
-              type: "plan.updated",
-              timestamp: Date.now(),
-              payload: {
-                plan: normalized,
-                note
-              }
-            });
+        const event = {
+          id: randomUUID(),
+          taskId: task.id,
+          type: "plan.updated",
+          timestamp: Date.now(),
+          payload: {
+            plan: normalized,
+            note
+          }
+        } satisfies TaskEvent;
+        await store.appendEvent(task.id, event);
+        await notifyTaskEvent?.(task.id, event);
             return { acknowledged: true };
           }
         }),
@@ -204,20 +218,38 @@ export async function runTaskWithAgent({ workerId, task, input, store }: RunTask
     });
 
     await updateStatus("executing", "Plan execution started");
-    const basePrompt = `You are working on task "${task.title}".
-Task description: ${task.description ?? "(none provided)"}.
-Repository URL: ${input.repoUrl ?? "(not supplied)"}.
-Constraints: ${(input.constraints ?? []).join("; ") || "None"}.
-Branch: ${input.branch ?? "(not specified)"} (base: ${input.baseBranch ?? "main"}).
+    const basePrompt = `You are working on task "${task.title}" as an autonomous senior software engineer embedded in a background worker.
 
-Deliver:
-- Updated execution plan via the updatePlan tool.
-- Log entries when meaningful work happens.
-- Status transitions via setStatus.
-- Use readFile/writeFile/listFiles/runCommand/gitDiff tools to inspect and modify the repository.
- - Final textual summary of progress, key diffs, and next steps. If you determine no code changes are needed, produce a detailed security assessment and documentation updates explaining why.
+Context
+- Task description: ${task.description ?? "(none provided)"}.
+- Repository URL: ${input.repoUrl ?? "(not supplied)"}.
+- Constraints: ${(input.constraints ?? []).join("; ") || "None"}.
+- Working branch: ${input.branch ?? "(not specified)"} (base: ${input.baseBranch ?? "main"}).
 
-Start by emitting an initial plan covering research, implementation, testing, and review.`;
+Operating Principles
+1. Ship tangible value on every run—prefer concise, high-utility diffs or substantive written deliverables.
+2. Maintain an explicit, evolving execution plan; never let the plan fall out of sync with reality.
+3. Validate assumptions through repository inspection and commands rather than speculation.
+4. Surface blockers early via log entries or status updates; do not silently stall.
+5. Keep changes auditable: capture diffs, explain intent, and note residual risks.
+
+Process Expectations
+- Immediately call the updatePlan tool with a plan that spans research, implementation, testing, and review.
+- Update the plan after each meaningful action so step statuses remain accurate.
+- Log progress for notable milestones, insights, or decisions (minimum once per major phase).
+- Use setStatus when transitioning between planning, executing, and completion states.
+- Exercise repository tools (readFile/writeFile/listFiles/runCommand/gitDiff) to gather evidence and modify files.
+
+Quality Bar & Validation
+- Run relevant tests or checks when practical; if impractical, explain why and describe alternate validation.
+- Before finishing, review the gitDiff output to ensure the artifacts align with the task intent.
+- If work produces no code changes, create documentation updates or a concrete security/quality report instead of exiting silently.
+
+Deliverables
+- A final summary that highlights implemented changes, validation performed, and recommended next steps.
+- Any supporting documentation or reports needed to justify the closure of the task.
+
+Begin by emitting the initial execution plan described above.`;
 
     const generateWithGemini = async (prompt: string) => {
       let attempts = 0;
@@ -295,14 +327,17 @@ Start by emitting an initial plan covering research, implementation, testing, an
           ? basePrompt
           : `${basePrompt}
 
-The first pass finished without producing tangible artifacts. Perform a focused follow-up that delivers concrete documentation updates, security findings, or code changes. Avoid re-stating the original plan without additional action.`;
+The first pass finished without producing tangible artifacts. Treat this follow-up as a high-priority escalation:
+- Identify a concrete deliverable you can complete within this attempt (code change, new file, or detailed written assessment).
+- Narrow scope; act decisively—do not rehash the previous plan without executing.
+- If code changes truly are unnecessary, produce a written artifact (e.g. SECURITY.md update or incident note) that captures why.`;
 
       const { text, finishReason } = await generateWithGemini(prompt);
       latestSummary = text ?? "Agent finished without summary";
 
       const diff = await workspace.getDiff();
       if (diff.trim()) {
-        await store.appendEvent(task.id, {
+        const artifactEvent = {
           id: randomUUID(),
           taskId: task.id,
           type: "task.artifact_generated",
@@ -312,9 +347,11 @@ The first pass finished without producing tangible artifacts. Perform a focused 
             diff,
             workerId
           }
-        });
+        } satisfies TaskEvent;
+        await store.appendEvent(task.id, artifactEvent);
+        await notifyTaskEvent?.(task.id, artifactEvent);
 
-        await store.appendEvent(task.id, {
+        const completedEvent = {
           id: randomUUID(),
           taskId: task.id,
           type: "task.completed",
@@ -325,7 +362,10 @@ The first pass finished without producing tangible artifacts. Perform a focused 
             finishReason,
             workerId
           }
-        });
+        } satisfies TaskEvent;
+        await store.appendEvent(task.id, completedEvent);
+        await notifyTaskEvent?.(task.id, completedEvent);
+        await notifyTaskUpdate?.(task.id);
 
         return { success: true, summary: latestSummary } as const;
       }

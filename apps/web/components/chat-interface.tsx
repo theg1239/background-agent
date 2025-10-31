@@ -1,23 +1,26 @@
 "use client";
 
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useEffect, useMemo, useRef, useState, useCallback } from "react";
 import { clsx } from "clsx";
 import type { Task, TaskEvent } from "@background-agent/shared";
 import { useTaskEvents } from "../hooks/use-task-events";
 import { CreateTaskForm } from "./create-task-form";
 import { useTaskIndex } from "../hooks/use-task-index";
 import { DiffArtifactCard } from "./diff-artifact-card";
+import type { GitHubAuthState } from "../lib/server/github-auth";
 
 interface ChatInterfaceProps {
   initialTasks: Task[];
+  initialGitHubAuth: GitHubAuthState;
 }
 
-export function ChatInterface({ initialTasks }: ChatInterfaceProps) {
+export function ChatInterface({ initialTasks, initialGitHubAuth }: ChatInterfaceProps) {
   const [activeTaskId, setActiveTaskId] = useState<string | undefined>(initialTasks[0]?.id);
   const [showHistory, setShowHistory] = useState(false);
   const [creationMessage, setCreationMessage] = useState<string | null>(null);
   const { tasks, upsertTask, replaceTask, removeTask } = useTaskIndex(initialTasks);
   const optimisticIds = useRef(new Set<string>());
+  const [githubAuth, setGitHubAuth] = useState<GitHubAuthState>(initialGitHubAuth);
 
   const activeTask = useMemo(() => tasks.find((task) => task.id === activeTaskId), [tasks, activeTaskId]);
 
@@ -143,6 +146,10 @@ export function ChatInterface({ initialTasks }: ChatInterfaceProps) {
     ? "text-emerald-400"
     : "text-amber-400";
 
+  const handleGitHubAuthChange = useCallback((state: GitHubAuthState) => {
+    setGitHubAuth(state);
+  }, []);
+
 
   return (
     <div className="relative mx-auto flex h-full w-full max-w-3xl flex-1 flex-col gap-5 px-4 pb-10">
@@ -171,9 +178,18 @@ export function ChatInterface({ initialTasks }: ChatInterfaceProps) {
               {statusSummary}
             </p>
           </div>
-          <span className={clsx("text-xs font-medium", connectionClass)}>
-            {connectionLabel}
-          </span>
+          <div className="flex flex-col items-end gap-1">
+            <span className={clsx("text-xs font-medium", connectionClass)}>{connectionLabel}</span>
+            {githubAuth.status === "connected" && githubAuth.user ? (
+              <span className="text-[11px] uppercase tracking-[0.2em] text-neutral-500">
+                GitHub · {githubAuth.user.login}
+              </span>
+            ) : (
+              <span className="text-[11px] uppercase tracking-[0.2em] text-neutral-600">
+                GitHub · Not linked
+              </span>
+            )}
+          </div>
         </div>
 
         <div className="chat-font flex-1 space-y-3 overflow-y-auto px-5 pb-6 pt-4 text-sm text-neutral-100">
@@ -204,6 +220,8 @@ export function ChatInterface({ initialTasks }: ChatInterfaceProps) {
                   eventId={event.eventId ?? event.id}
                   taskTitle={resolvedTask.title}
                   repoUrl={resolvedTask.repoUrl}
+                  githubAuth={githubAuth}
+                  onGitHubAuthChange={handleGitHubAuthChange}
                 />
               ) : null}
             </div>
@@ -280,7 +298,7 @@ function humanizeStatus(status: string) {
     .join(" ");
 }
 
-function formatDuration(ms: number) {
+export function formatDuration(ms: number) {
   const totalSeconds = Math.max(0, Math.floor(ms / 1_000));
   const hours = Math.floor(totalSeconds / 3_600);
   const minutes = Math.floor((totalSeconds % 3_600) / 60);

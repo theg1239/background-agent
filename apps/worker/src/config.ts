@@ -36,5 +36,17 @@ export const config = {
   geminiApiKeys: requiredList(
     "GOOGLE_GENERATIVE_AI_API_KEYS or GOOGLE_GENERATIVE_AI_API_KEY",
     process.env.GOOGLE_GENERATIVE_AI_API_KEYS ?? process.env.GOOGLE_GENERATIVE_AI_API_KEY
-  )
+  ),
+  socketPort: Number(process.env.WORKER_SOCKET_PORT ?? "4000"),
+  socketHost: process.env.WORKER_SOCKET_HOST ?? "0.0.0.0",
+  socketCorsOrigin: (() => {
+    const raw = process.env.WORKER_SOCKET_CORS_ORIGIN;
+    if (!raw || raw === "*") {
+      return "*";
+    }
+    return raw
+      .split(",")
+      .map((value) => value.trim())
+      .filter((value) => value.length > 0);
+  })()
 };

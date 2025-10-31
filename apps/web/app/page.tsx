@@ -1,10 +1,14 @@
 import { ChatInterface } from "../components/chat-interface";
 import { taskStore } from "../lib/server/task-store";
+import { getOrCreateGitHubAuthState } from "../lib/server/github-auth";
 
 export const revalidate = 0;
 
 export default async function Home() {
-  const tasks = await taskStore.listTasks();
+  const [tasks, githubAuth] = await Promise.all([
+    taskStore.listTasks(),
+    getOrCreateGitHubAuthState()
+  ]);
 
   return (
     <main className="min-h-screen bg-linear-to-br from-[#0a0a0a] via-[#050505] to-[#0a0a0a] px-6 py-12 text-neutral-100">
@@ -17,7 +21,7 @@ export default async function Home() {
             away. When you return, reconnect to a live stream of events and approvals.
           </p>
         </header> */}
-        <ChatInterface initialTasks={tasks} />
+        <ChatInterface initialTasks={tasks} initialGitHubAuth={githubAuth} />
       </div>
     </main>
   );

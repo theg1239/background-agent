@@ -97,3 +97,9 @@ export const TaskApprovalSchema = z.object({
   resolvedAt: z.number().optional()
 });
 export type TaskApproval = z.infer<typeof TaskApprovalSchema>;
+
+export interface TaskBroadcaster {
+  publishTaskUpdate(task: Task): Promise<void>;
+  publishTaskDeleted(taskId: string): Promise<void>;
+  publishTaskEvent(taskId: string, event: TaskEvent): Promise<void>;
+}

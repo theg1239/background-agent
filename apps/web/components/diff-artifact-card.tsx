@@ -1,8 +1,23 @@
 "use client";
 
-import { type FormEvent, useMemo, useState, useTransition } from "react";
+import {
+  type FormEvent,
+  useCallback,
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+  useTransition
+} from "react";
 import { clsx } from "clsx";
 import { createPullRequestAction } from "../app/actions/task-actions";
+import {
+  getGitHubAuthStateAction,
+  pollGitHubDeviceFlowAction,
+  startGitHubDeviceFlowAction
+} from "../app/actions/github-oauth-actions";
+import type { GitHubAuthState } from "../lib/server/github-auth";
+import { formatDuration } from "./chat-interface";
 
 interface DiffArtifactCardProps {
   diff: string;
@@ -10,18 +25,43 @@ interface DiffArtifactCardProps {
   eventId: string;
   taskTitle?: string;
   repoUrl?: string;
+  githubAuth?: GitHubAuthState;
+  onGitHubAuthChange?: (state: GitHubAuthState) => void;
 }
 
 type StatusMessage =
   | { type: "success"; message: string; url?: string }
   | { type: "error"; message: string }
+  | { type: "info"; message: string }
   | null;
 
-export function DiffArtifactCard({ diff, taskId, eventId, taskTitle, repoUrl }: DiffArtifactCardProps) {
+type DeviceFlowState = {
+  deviceCode: string;
+  userCode: string;
+  verificationUri: string;
+  interval: number;
+  expiresAt: number;
+};
+
+export function DiffArtifactCard({
+  diff,
+  taskId,
+  eventId,
+  taskTitle,
+  repoUrl,
+  githubAuth,
+  onGitHubAuthChange
+}: DiffArtifactCardProps) {
   const [showPrForm, setShowPrForm] = useState(false);
   const [status, setStatus] = useState<StatusMessage>(null);
+  const [deviceFlow, setDeviceFlow] = useState<DeviceFlowState | null>(null);
+  const [deviceFlowTick, setDeviceFlowTick] = useState(() => Date.now());
+  const [isStartingDeviceFlow, setIsStartingDeviceFlow] = useState(false);
   const [copyState, setCopyState] = useState<"patch" | "apply" | null>(null);
   const [isPending, startTransition] = useTransition();
+  const pollTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+
+  const isGitHubConnected = githubAuth?.status === "connected";
 
   const defaultBranchName = useMemo(() => {
     const base = (taskTitle ?? "agent-update")
@@ -47,6 +87,163 @@ export function DiffArtifactCard({ diff, taskId, eventId, taskTitle, repoUrl }: 
     return lines.join("\n");
   });
 
+  const deviceFlowSecondsRemaining = useMemo(() => {
+    if (!deviceFlow) return null;
+    return Math.max(0, Math.floor((deviceFlow.expiresAt - deviceFlowTick) / 1000));
+  }, [deviceFlow, deviceFlowTick]);
+
+  const deviceFlowCountdownLabel = useMemo(() => {
+    if (deviceFlowSecondsRemaining === null) {
+      return null;
+    }
+    return formatDuration(deviceFlowSecondsRemaining * 1000);
+  }, [deviceFlowSecondsRemaining]);
+
+  useEffect(() => {
+    if (!deviceFlow) {
+      return;
+    }
+    setDeviceFlowTick(Date.now());
+    const interval = setInterval(() => setDeviceFlowTick(Date.now()), 1000);
+    return () => clearInterval(interval);
+  }, [deviceFlow]);
+
+  const beginDeviceFlow = useCallback(async () => {
+    if (deviceFlow || isStartingDeviceFlow) {
+      return;
+    }
+    setIsStartingDeviceFlow(true);
+    setStatus({ type: "info", message: "Waiting for GitHub authorization..." });
+    try {
+      const result = await startGitHubDeviceFlowAction();
+      if (!result.ok) {
+        setStatus({ type: "error", message: result.error });
+        setDeviceFlow(null);
+        return;
+      }
+      setDeviceFlow({
+        deviceCode: result.deviceCode,
+        userCode: result.userCode,
+        verificationUri: result.verificationUri,
+        interval: Math.max(result.interval, 1),
+        expiresAt: Date.now() + result.expiresIn * 1000
+      });
+      setDeviceFlowTick(Date.now());
+      setStatus({
+        type: "info",
+        message: "Enter the GitHub verification code below to connect."
+      });
+    } catch (error) {
+      setStatus({
+        type: "error",
+        message:
+          error instanceof Error ? error.message : "Failed to start GitHub authorization."
+      });
+      setDeviceFlow(null);
+    } finally {
+      setIsStartingDeviceFlow(false);
+    }
+  }, [deviceFlow, isStartingDeviceFlow]);
+
+  const refreshGitHubAuth = useCallback(async () => {
+    if (!onGitHubAuthChange) {
+      return;
+    }
+    try {
+      const state = await getGitHubAuthStateAction();
+      onGitHubAuthChange(state);
+    } catch (error) {
+      console.error("Failed to refresh GitHub auth state", error);
+    }
+  }, [onGitHubAuthChange]);
+
+  useEffect(() => {
+    if (!deviceFlow) {
+      if (pollTimeoutRef.current) {
+        clearTimeout(pollTimeoutRef.current);
+        pollTimeoutRef.current = null;
+      }
+      return;
+    }
+
+    let cancelled = false;
+
+    function schedule(delayMs: number) {
+      if (cancelled) return;
+      if (pollTimeoutRef.current) {
+        clearTimeout(pollTimeoutRef.current);
+      }
+      pollTimeoutRef.current = setTimeout(() => {
+        if (cancelled) return;
+        void poll();
+      }, delayMs);
+    }
+
+    async function poll() {
+      if (!deviceFlow) {
+        return;
+      }
+      if (Date.now() >= deviceFlow.expiresAt) {
+        setStatus({
+          type: "error",
+          message: "GitHub verification code expired. Start the connection again."
+        });
+        setDeviceFlow(null);
+        return;
+      }
+
+      try {
+        const outcome = await pollGitHubDeviceFlowAction(deviceFlow.deviceCode);
+        if (cancelled) {
+          return;
+        }
+
+        if (outcome.ok) {
+          setDeviceFlow(null);
+          setStatus({
+            type: "success",
+            message: "GitHub connected. You can now create a pull request."
+          });
+          await refreshGitHubAuth();
+          setShowPrForm(true);
+          return;
+        }
+
+        if (outcome.status === "pending" || outcome.status === "slow_down") {
+          setStatus({ type: "info", message: "Waiting for GitHub authorization..." });
+          schedule(Math.max(outcome.interval, 1) * 1000);
+          return;
+        }
+
+        const failureMessage = outcome.status === "error"
+          ? outcome.error ?? "GitHub authorization failed."
+          : "GitHub authorization failed.";
+        setStatus({
+          type: "error",
+          message: failureMessage
+        });
+        setDeviceFlow(null);
+      } catch (error) {
+        console.error("Failed to poll GitHub device flow", error);
+        setStatus({
+          type: "error",
+          message: "Failed to check GitHub authorization status."
+        });
+        setDeviceFlow(null);
+      }
+    }
+
+    schedule(Math.max(deviceFlow.interval, 1) * 1000);
+
+    return () => {
+      cancelled = true;
+      if (pollTimeoutRef.current) {
+        clearTimeout(pollTimeoutRef.current);
+        pollTimeoutRef.current = null;
+      }
+    };
+  }, [deviceFlow, refreshGitHubAuth]);
+
   const gitApplySnippet = useMemo(() => {
     const marker = "AGENT_PATCH";
     const trimmedDiff = diff.endsWith("\n") ? diff : `${diff}\n`;
@@ -58,18 +255,40 @@ export function DiffArtifactCard({ diff, taskId, eventId, taskTitle, repoUrl }: 
       const text = variant === "patch" ? diff : gitApplySnippet;
       await navigator.clipboard.writeText(text);
       setCopyState(variant);
-      setStatus({ type: "success", message: variant === "patch" ? "Patch copied." : "git apply snippet copied." });
+      const message = variant === "patch" ? "Patch copied." : "git apply snippet copied.";
+      setStatus({ type: "success", message });
       setTimeout(() => {
         setCopyState(null);
-        setStatus(null);
+        setStatus((current) => (current?.type === "success" && current.message === message ? null : current));
       }, 2500);
     } catch (error) {
       setStatus({ type: "error", message: "Clipboard access was denied." });
     }
   };
 
+  const handleCopyUserCode = useCallback(async () => {
+    if (!deviceFlow) {
+      return;
+    }
+    try {
+      await navigator.clipboard.writeText(deviceFlow.userCode);
+      const message = "Verification code copied.";
+      setStatus({ type: "success", message });
+      setTimeout(() => {
+        setStatus((current) => (current?.type === "success" && current.message === message ? null : current));
+      }, 2500);
+    } catch (error) {
+      setStatus({ type: "error", message: "Clipboard access was denied." });
+    }
+  }, [deviceFlow]);
+
   const handleSubmit = (event: FormEvent<HTMLFormElement>) => {
     event.preventDefault();
+    if (!isGitHubConnected) {
+      setStatus({ type: "info", message: "Connect GitHub before creating a pull request." });
+      void beginDeviceFlow();
+      return;
+    }
     startTransition(async () => {
       setStatus(null);
       const result = await createPullRequestAction({
@@ -91,7 +310,21 @@ export function DiffArtifactCard({ diff, taskId, eventId, taskTitle, repoUrl }: 
       } else {
         setStatus({ type: "error", message: result.error ?? "Unable to create pull request." });
       }
+
+      await refreshGitHubAuth();
     });
+  };
+
+  const handleTogglePrForm = () => {
+    if (!isGitHubConnected) {
+      setStatus({ type: "info", message: "Connect GitHub to create a pull request." });
+      setShowPrForm(false);
+      void beginDeviceFlow();
+      return;
+    }
+    setDeviceFlow(null);
+    setStatus(null);
+    setShowPrForm((value) => !value);
   };
 
   return (
@@ -120,8 +353,14 @@ export function DiffArtifactCard({ diff, taskId, eventId, taskTitle, repoUrl }: 
           </button>
           <button
             type="button"
-            onClick={() => setShowPrForm((value) => !value)}
-            className="rounded-full bg-white px-3 py-1 text-xs font-semibold text-black transition hover:bg-neutral-200"
+            onClick={handleTogglePrForm}
+            className={clsx(
+              "rounded-full px-3 py-1 text-xs font-semibold transition",
+              isGitHubConnected
+                ? "bg-white text-black hover:bg-neutral-200"
+                : "border border-neutral-700 bg-neutral-900 text-neutral-300 hover:border-neutral-500 hover:text-white"
+            )}
+            aria-disabled={!isGitHubConnected}
           >
             {showPrForm ? "Cancel PR" : "Create GitHub PR"}
           </button>
@@ -131,7 +370,11 @@ export function DiffArtifactCard({ diff, taskId, eventId, taskTitle, repoUrl }: 
           <div
             className={clsx(
               "mt-3 text-xs",
-              status.type === "success" ? "text-emerald-400" : "text-red-400"
+              status.type === "success"
+                ? "text-emerald-400"
+                : status.type === "error"
+                ? "text-red-400"
+                : "text-neutral-400"
             )}
           >
             <span>{status.message}</span>
@@ -145,6 +388,51 @@ export function DiffArtifactCard({ diff, taskId, eventId, taskTitle, repoUrl }: 
                 View PR
               </a>
             ) : null}
+          </div>
+        ) : null}
+
+        {!isGitHubConnected && !deviceFlow ? (
+          <p className="mt-3 text-xs text-neutral-400">
+            Click "Create GitHub PR" to connect your GitHub account and enable pull requests.
+          </p>
+        ) : null}
+
+        {deviceFlow ? (
+          <div className="mt-4 space-y-3 rounded-2xl border border-neutral-800 bg-neutral-900/60 p-4 text-xs text-neutral-200">
+            <div>
+              <p className="text-sm font-semibold text-white">Connect GitHub</p>
+              <p className="mt-1 text-neutral-300">
+                Visit{" "}
+                <a
+                  href={deviceFlow.verificationUri}
+                  target="_blank"
+                  rel="noreferrer"
+                  className="underline"
+                >
+                  {deviceFlow.verificationUri.replace(/^https?:\/\//, "")}
+                </a>{" "}
+                and enter the code below.
+              </p>
+            </div>
+            <div className="flex flex-wrap items-center gap-3">
+              <span className="rounded-lg bg-neutral-950 px-3 py-2 text-base font-mono tracking-widest text-white">
+                {deviceFlow.userCode}
+              </span>
+              <button
+                type="button"
+                onClick={handleCopyUserCode}
+                className="rounded-full border border-neutral-700 px-3 py-1 text-xs font-semibold text-neutral-200 transition hover:border-neutral-500 hover:text-white"
+              >
+                Copy code
+              </button>
+            </div>
+            <p className="text-neutral-400">
+              Waiting for authorization
+              {deviceFlowCountdownLabel ? ` • ${deviceFlowCountdownLabel} left` : ""}.
+            </p>
+            <p className="text-neutral-500">
+              After approving access, return here. The pull request form unlocks automatically.
+            </p>
           </div>
         ) : null}
 
@@ -204,7 +492,7 @@ export function DiffArtifactCard({ diff, taskId, eventId, taskTitle, repoUrl }: 
             </div>
             <button
               type="submit"
-              disabled={isPending}
+              disabled={isPending || !isGitHubConnected}
               className="rounded-full bg-white px-4 py-2 text-sm font-semibold text-black transition hover:bg-neutral-200 disabled:cursor-not-allowed disabled:bg-neutral-800 disabled:text-neutral-400"
             >
               {isPending ? "Creating..." : "Create pull request"}

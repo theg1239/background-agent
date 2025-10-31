@@ -1,11 +1,12 @@
 "use client";
 
 import { useEffect, useMemo, useRef, useState } from "react";
+import type { Socket } from "socket.io-client";
+import { getSocket } from "../lib/client/socket";
 import {
   Task,
   TaskEvent,
   TaskEventStreamSnapshot,
-  TASK_EVENT_TYPES,
   TaskPlanStepSchema,
   TaskStatusSchema
 } from "@background-agent/shared";
@@ -18,7 +19,8 @@ export function useTaskEvents(taskId?: string, options?: Options) {
   const [events, setEvents] = useState<TaskEvent[]>(() => options?.initialSnapshot?.events ?? []);
   const [task, setTask] = useState<Task | undefined>(options?.initialSnapshot?.task);
   const [isConnected, setIsConnected] = useState(false);
-  const eventSourceRef = useRef<EventSource | null>(null);
+  const socketRef = useRef<Socket | null>(null);
+  const lastSubscribedTaskId = useRef<string | undefined>(undefined);
 
   useEffect(() => {
     if (options?.initialSnapshot) {
@@ -28,8 +30,13 @@ export function useTaskEvents(taskId?: string, options?: Options) {
   }, [options?.initialSnapshot?.task?.id]);
 
   useEffect(() => {
+    const socket = getSocket();
+    if (lastSubscribedTaskId.current && socket) {
+      socket.emit("task:unsubscribe", lastSubscribedTaskId.current);
+      lastSubscribedTaskId.current = undefined;
+    }
+
     if (!taskId || taskId.startsWith("temp-")) {
-      eventSourceRef.current?.close();
       setIsConnected(false);
       if (!taskId) {
         setEvents([]);
@@ -38,25 +45,62 @@ export function useTaskEvents(taskId?: string, options?: Options) {
       return;
     }
 
-    const source = new EventSource(`/events/tasks/${taskId}`);
-    eventSourceRef.current = source;
+    const abortController = new AbortController();
+    let cancelled = false;
 
-    const handleSnapshot = (event: MessageEvent<string>) => {
-      const snapshot: TaskEventStreamSnapshot = JSON.parse(event.data);
-      setTask(snapshot.task);
-      setEvents(snapshot.events);
+    (async () => {
+      try {
+        const response = await fetch(`/api/tasks/${taskId}/events`, {
+          cache: "no-store",
+          signal: abortController.signal
+        });
+        if (!response.ok) {
+          throw new Error(`Failed to load task snapshot (${response.status})`);
+        }
+        const snapshot = (await response.json()) as TaskEventStreamSnapshot;
+        if (!cancelled) {
+          setTask(snapshot.task);
+          setEvents(snapshot.events);
+        }
+      } catch (error) {
+        if (!abortController.signal.aborted) {
+          console.error("Failed to load task snapshot", error);
+        }
+      }
+    })().catch((error) => {
+      console.error("Unexpected snapshot error", error);
+    });
+
+    if (!socket) {
+      return () => {
+        cancelled = true;
+        abortController.abort();
+        setIsConnected(false);
+      };
+    }
+
+    socketRef.current = socket;
+
+    const handleConnect = () => setIsConnected(true);
+    const handleDisconnect = () => setIsConnected(false);
+    const handleTaskUpdate = (updated: Task) => {
+      if (updated.id === taskId) {
+        setTask(updated);
+      }
     };
+    const handleTaskEvent = (payload: { taskId: string; event: TaskEvent }) => {
+      if (!payload || payload.taskId !== taskId) {
+        return;
+      }
 
-    source.addEventListener("snapshot", handleSnapshot as EventListener);
-
-    const makeHandler = (_type: string) => (event: MessageEvent<string>) => {
-      const parsed: TaskEvent = JSON.parse(event.data);
+      const parsed = payload.event;
       setEvents((prev) => {
-        if (prev.some((e) => e.id === parsed.id)) {
+        if (prev.some((event) => event.id === parsed.id)) {
           return prev;
         }
         return [...prev, parsed].sort((a, b) => a.timestamp - b.timestamp);
       });
+
       const statusResult = TaskStatusSchema.safeParse(parsed.payload?.status);
       if (statusResult.success) {
         const nextStatus = statusResult.data;
@@ -70,24 +114,30 @@ export function useTaskEvents(taskId?: string, options?: Options) {
       }
     };
 
-    const handlers = new Map<string, (event: MessageEvent<string>) => void>();
-    for (const type of TASK_EVENT_TYPES) {
-      const handler = makeHandler(type);
-      handlers.set(type, handler);
-      source.addEventListener(type, handler as EventListener);
+    if (socket.connected) {
+      setIsConnected(true);
     }
 
-    source.onopen = () => setIsConnected(true);
-    source.onerror = () => {
-      setIsConnected(false);
-    };
+    socket.on("connect", handleConnect);
+    socket.on("disconnect", handleDisconnect);
+    socket.on("task:update", handleTaskUpdate);
+    socket.on("task:event", handleTaskEvent);
+
+    socket.emit("task:subscribe", taskId);
+    lastSubscribedTaskId.current = taskId;
 
     return () => {
-      source.close();
-      source.removeEventListener("snapshot", handleSnapshot as EventListener);
-      for (const [type, handler] of handlers) {
-        source.removeEventListener(type, handler as EventListener);
+      cancelled = true;
+      abortController.abort();
+      socket.emit("task:unsubscribe", taskId);
+      socket.off("connect", handleConnect);
+      socket.off("disconnect", handleDisconnect);
+      socket.off("task:update", handleTaskUpdate);
+      socket.off("task:event", handleTaskEvent);
+      if (socketRef.current === socket) {
+        socketRef.current = null;
       }
+      setIsConnected(false);
     };
   }, [taskId]);
 

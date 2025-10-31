@@ -9,6 +9,8 @@ import {
 } from "@background-agent/shared";
 import { taskStore } from "../../lib/server/task-store";
 import { enqueueTaskExecution } from "../../lib/server/worker-dispatch";
+import { requireSessionId } from "../../lib/server/session";
+import { getGitHubToken } from "../../lib/server/github-token-store";
 
 function sanitizeCreateTaskInput(input: CreateTaskInput): CreateTaskInput {
   const title = input.title.trim();
@@ -80,11 +82,12 @@ export async function createPullRequestAction(input: z.infer<typeof CreatePullRe
 
   const { taskId, eventId, baseBranch, branchName, title, body } = parsed.data;
 
-  const token = process.env.GITHUB_TOKEN;
-  if (!token) {
+  const sessionId = await requireSessionId();
+  const tokenRecord = await getGitHubToken(sessionId);
+  if (!tokenRecord) {
     return {
       ok: false,
-      error: "GITHUB_TOKEN is not configured on the server."
+      error: "GitHub authorization is required. Connect your GitHub account before creating a pull request."
     } as const;
   }
 
@@ -141,7 +144,17 @@ export async function createPullRequestAction(input: z.infer<typeof CreatePullRe
     } as const;
   }
 
-  const github = createGitHubClient(token);
+  const hasRepoScope = tokenRecord.scope
+    .split(/[\s,]+/)
+    .some((entry) => entry.trim() === "repo" || entry.trim() === "public_repo");
+  if (!hasRepoScope) {
+    return {
+      ok: false,
+      error: "The connected GitHub token is missing the required repo scope."
+    } as const;
+  }
+
+  const github = createGitHubClient(tokenRecord.accessToken);
 
   try {
     const baseRef = await github.getJson(

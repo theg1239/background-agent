@@ -4,7 +4,7 @@ import { config } from "./config";
 const MIN_BACKOFF_MS = 5_000;
 const DEFAULT_RATE_LIMIT_BACKOFF_MS = 30_000;
 
-type GeminiModel = ReturnType<ReturnType<typeof createGoogleGenerativeAI>>;
+type GeminiClientFactory = ReturnType<typeof createGoogleGenerativeAI>;
 
 interface KeyState {
   key: string;
@@ -98,7 +98,7 @@ class GeminiKeyManager {
 const keyManager = new GeminiKeyManager(config.geminiApiKeys);
 
 export interface GeminiModelHandle {
-  model: GeminiModel;
+  model: unknown;
   index: number;
   label: string;
   mask: string;
@@ -140,16 +140,18 @@ function parseRetryAfterMs(error: unknown): { retryAfterMs?: number; message: st
   };
 }
 
-export function acquireGeminiModel(modelName: string) {
+export function acquireGeminiModel(modelName: string): GeminiModelHandle {
   const { state, index } = keyManager.acquire();
-  const client = createGoogleGenerativeAI({ apiKey: state.key });
+  const client: GeminiClientFactory = createGoogleGenerativeAI({
+    apiKey: state.key
+  });
   const model = client(modelName);
   return {
     model,
     index,
     label: state.label,
     mask: state.mask
-  } satisfies GeminiModelHandle;
+  };
 }
 
 export function reportGeminiSuccess(handle: GeminiModelHandle) {

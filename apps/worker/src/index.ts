@@ -1,9 +1,13 @@
+import { createServer } from "node:http";
 import { randomUUID } from "node:crypto";
 import { setTimeout as sleep } from "node:timers/promises";
 import Redis from "ioredis";
 import { TaskQueue, TaskStore } from "@background-agent/shared";
+import type { TaskEvent } from "@background-agent/shared";
+import { Server as SocketIOServer } from "socket.io";
 import { config } from "./config";
 import { runTaskWithAgent } from "./task-runner";
+import { SocketTaskBroadcaster, registerSocketHandlers } from "./socket-broadcaster";
 
 const workerId = process.env.WORKER_ID ?? randomUUID();
 
@@ -13,8 +17,39 @@ const redis = new Redis(config.redisUrl, {
   lazyConnect: false
 });
 
+const httpServer = createServer();
+const io = new SocketIOServer({
+  cors: {
+    origin: config.socketCorsOrigin,
+    methods: ["GET", "POST"]
+  }
+});
+
+io.attach(httpServer);
+
+registerSocketHandlers(io);
+
+const broadcaster = new SocketTaskBroadcaster(io);
 const store = new TaskStore(redis);
 const queue = new TaskQueue(redis, store);
+
+httpServer.listen(config.socketPort, config.socketHost, () => {
+  console.log(
+    `Socket server listening on ${config.socketHost}:${config.socketPort} (worker ${workerId})`
+  );
+});
+
+async function emitTaskUpdate(taskId: string) {
+  const updated = await store.getTask(taskId);
+  if (updated) {
+    await broadcaster.publishTaskUpdate(updated);
+  }
+}
+
+async function emitTaskEvent(taskId: string, event: TaskEvent) {
+  await broadcaster.publishTaskEvent(taskId, event);
+  await emitTaskUpdate(taskId);
+}
 
 async function processLoop() {
   // eslint-disable-next-line no-constant-condition
@@ -29,13 +64,16 @@ async function processLoop() {
       const { task, input } = claim;
 
       await store.updateStatus(task.id, "planning", { workerId });
+      await emitTaskUpdate(task.id);
 
       try {
         const result = await runTaskWithAgent({
           store,
           workerId,
           task,
-          input
+          input,
+          notifyTaskUpdate: emitTaskUpdate,
+          notifyTaskEvent: emitTaskEvent
         });
 
         if (!result.success) {
@@ -44,7 +82,7 @@ async function processLoop() {
 
         await queue.ack(task.id);
       } catch (error) {
-        await store.appendEvent(task.id, {
+        const failureEvent = {
           id: randomUUID(),
           taskId: task.id,
           type: "task.failed",
@@ -54,7 +92,9 @@ async function processLoop() {
             error: (error as Error).message,
             workerId
           }
-        });
+        } satisfies TaskEvent;
+        await store.appendEvent(task.id, failureEvent);
+        await emitTaskEvent(task.id, failureEvent);
         await queue.ack(task.id);
       }
     } catch (outerError) {
