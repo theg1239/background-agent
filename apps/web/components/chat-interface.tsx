@@ -136,7 +136,7 @@ export function ChatInterface({ initialTasks }: ChatInterfaceProps) {
     : "text-neutral-400";
 
   const isOptimisticActive = Boolean(activeTaskId && activeTaskId.startsWith("temp-"));
-  const connectionLabel = isOptimisticActive ? "Starting" : isConnected ? "Live" : "Reconnecting";
+  const connectionLabel = isOptimisticActive ? "Starting" : isConnected ? "Live" : "Queued";
   const connectionClass = isOptimisticActive
     ? "text-amber-300"
     : isConnected
