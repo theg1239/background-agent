@@ -1,5 +1,5 @@
 import { CreateTaskInput, Task } from "@background-agent/shared";
-import { getRedis } from "./redis";
+import { redis } from "./redis";
 import { taskStore } from "./task-store";
 
 const QUEUE_KEY = "tasks:queue";
@@ -14,7 +14,7 @@ interface TaskClaim {
 }
 
 class TaskQueue {
-  private redis = getRedis();
+  private redis = redis;
 
   async enqueue(taskId: string) {
     const added = await this.redis.sadd(PENDING_SET_KEY, taskId);
@@ -28,7 +28,7 @@ class TaskQueue {
     await this.requeueLeases();
 
     while (true) {
-      const taskId = await this.redis.lpop(QUEUE_KEY);
+      const taskId = (await this.redis.lpop(QUEUE_KEY)) as string | null;
       if (!taskId) {
         return undefined;
       }
@@ -73,7 +73,9 @@ class TaskQueue {
 
   async requeueLeases() {
     const now = Date.now();
-    const expiredTaskIds = await this.redis.zrangebyscore(LEASE_ZSET_KEY, 0, now);
+    const expiredTaskIds = (await this.redis.zrange(LEASE_ZSET_KEY, 0, now, {
+      byscore: true
+    })) as string[];
     if (expiredTaskIds.length === 0) return;
 
     for (const taskId of expiredTaskIds) {

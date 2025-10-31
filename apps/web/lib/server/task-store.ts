@@ -8,7 +8,7 @@ import {
   TaskStatusSchema,
   TaskEventStreamSnapshot
 } from "@background-agent/shared";
-import { getRedis } from "./redis";
+import { redis } from "./redis";
 
 const encoder = new TextEncoder();
 const TASK_INDEX_KEY = "tasks:index";
@@ -22,7 +22,7 @@ interface TaskRecord extends Task {
 }
 
 class TaskRepository {
-  private redis = getRedis();
+  private redis = redis;
 
   private taskKey(taskId: string) {
     return `${TASK_KEY_PREFIX}${taskId}`;

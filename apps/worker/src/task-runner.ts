@@ -1,13 +1,10 @@
 import { randomUUID } from "node:crypto";
 import { ToolLoopAgent, stepCountIs, tool } from "ai";
+import type { LanguageModel } from "ai";
 import { z } from "zod";
-import { google } from "@ai-sdk/google";
-import {
-  CreateTaskInput,
-  Task,
-  TaskPlanStep,
-  TaskStatusSchema
-} from "@background-agent/shared";
+import { createGoogleGenerativeAI } from "@ai-sdk/google";
+import type { CreateTaskInput, Task, TaskPlanStep } from "@background-agent/shared";
+import { TaskStatusSchema } from "@background-agent/shared";
 import { config } from "./config";
 import { TaskApiClient } from "./task-api";
 import { Workspace } from "./workspace";
@@ -19,7 +16,7 @@ interface RunTaskOptions {
   api: TaskApiClient;
 }
 
-const gemini = google({ apiKey: config.geminiApiKey });
+const google = createGoogleGenerativeAI({ apiKey: config.geminiApiKey });
 
 export async function runTaskWithAgent({ workerId, task, input, api }: RunTaskOptions) {
   const workspace = await Workspace.prepare(task.id);
@@ -85,8 +82,10 @@ export async function runTaskWithAgent({ workerId, task, input, api }: RunTaskOp
       await emitLog("info", "No repository URL provided; starting with empty workspace");
     }
 
+    const model = google("models/gemini-2.5-pro");
+
     const agent = new ToolLoopAgent({
-      model: gemini("gemini-2.5-pro"),
+      model: model as unknown as LanguageModel,
       instructions: `You are an autonomous senior software engineer inside a background task runner.
 - Always maintain an explicit execution plan.
 - Use the provided tools to update the plan, log progress, change task status, and work with the repository.

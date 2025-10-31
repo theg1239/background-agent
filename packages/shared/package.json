@@ -15,10 +15,10 @@
     "lint": "echo 'no lint configured'"
   },
   "dependencies": {
-    "zod": "^3.23.8"
+    "zod": "^3.25.76"
   },
   "devDependencies": {
-    "tsup": "^8.5.0",
-    "typescript": "^5"
+    "tsup": "^8.1.0",
+    "typescript": "^5.6.3"
   }
 }

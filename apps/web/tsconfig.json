@@ -21,7 +21,9 @@
     ],
     "paths": {
       "@/*": ["./*"],
-      "@shared/*": ["../../packages/shared/src/*"]
+      "@shared/*": ["../../packages/shared/src/*"],
+      "@background-agent/shared": ["../../packages/shared/src/index.ts"],
+      "@background-agent/shared/*": ["../../packages/shared/src/*"]
     }
   },
   "include": [

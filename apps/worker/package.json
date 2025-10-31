@@ -5,8 +5,8 @@
   "type": "module",
   "scripts": {
     "dev": "tsx watch src/index.ts",
-    "start": "NODE_ENV=production node dist/index.js",
-    "build": "tsup src/index.ts --format esm --dts false --splitting false --target node20"
+    "start": "node dist/index.js",
+    "build": "tsup src/index.ts --format esm --dts --splitting false --target node20"
   },
   "dependencies": {
     "@background-agent/shared": "workspace:*",
@@ -16,6 +16,7 @@
     "zod": "^3.25.76"
   },
   "devDependencies": {
+    "@types/node": "^20.14.10",
     "tsup": "^8.1.0",
     "tsx": "^4.19.1",
     "typescript": "^5.6.3"

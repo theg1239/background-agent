@@ -5,11 +5,15 @@
     "lib": ["DOM", "DOM.Iterable", "ES2022"],
     "skipLibCheck": true,
     "strict": true,
-    "moduleResolution": "NodeNext",
+    "moduleResolution": "Bundler",
     "resolveJsonModule": true,
     "esModuleInterop": true,
     "forceConsistentCasingInFileNames": true,
     "baseUrl": "./",
+    "paths": {
+      "@background-agent/shared": ["./packages/shared/src/index.ts"],
+      "@background-agent/shared/*": ["./packages/shared/src/*"]
+    },
     "types": []
   }
 }
