@@ -1,6 +1,15 @@
 "use client";
 
-import { FormEvent, useEffect, useMemo, useRef, useState, useCallback, useTransition } from "react";
+import {
+  FormEvent,
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+  useCallback,
+  useTransition,
+  useLayoutEffect
+} from "react";
 import { clsx } from "clsx";
 import type { Task, TaskEvent } from "@background-agent/shared";
 import { useTaskEvents } from "../hooks/use-task-events";
@@ -20,6 +29,10 @@ type PaneView = "chat" | "workspace";
 
 const ACTIVE_TASK_STATUSES: Task["status"][] = ["queued", "planning", "executing", "awaiting_approval"];
 const ACTIVE_TASK_STATUS_SET = new Set<Task["status"]>(ACTIVE_TASK_STATUSES);
+
+function compareTaskRecency(left: Task, right: Task) {
+  return (right.updatedAt ?? right.createdAt) - (left.updatedAt ?? left.createdAt);
+}
 
 function stripGitSuffix(value: string) {
   return value.endsWith(".git") ? value.slice(0, -4) : value;
@@ -82,6 +95,7 @@ export function ChatInterface({ initialTasks, initialGitHubAuth }: ChatInterface
   const [showQuickRepoField, setShowQuickRepoField] = useState(false);
   const [isFollowUpPending, startFollowUp] = useTransition();
   const [isQuickTaskPending, startQuickTask] = useTransition();
+  const [isHistoryOpen, setIsHistoryOpen] = useState(false);
   const { tasks, upsertTask, replaceTask, removeTask } = useTaskIndex(initialTasks);
   const optimisticIds = useRef(new Set<string>());
   const [githubAuth, setGitHubAuth] = useState<GitHubAuthState>(initialGitHubAuth);
@@ -209,12 +223,18 @@ export function ChatInterface({ initialTasks, initialGitHubAuth }: ChatInterface
   const workingDuration = workingSince ? Math.max(0, nowTick - workingSince) : undefined;
   const workingLabel = useMemo(() => (workingDuration ? formatDuration(workingDuration) : null), [workingDuration]);
 
-    const orderedTasks = useMemo(() => {
+  const activeTasks = useMemo(() => {
     return tasks
       .filter((taskItem) => ACTIVE_TASK_STATUS_SET.has(taskItem.status))
-      .sort((a, b) => (b.updatedAt || b.createdAt) - (a.updatedAt || a.createdAt));
+      .sort(compareTaskRecency);
   }, [tasks]);
-  
+
+  const historicalTasks = useMemo(() => {
+    return tasks
+      .filter((taskItem) => !ACTIVE_TASK_STATUS_SET.has(taskItem.status))
+      .sort(compareTaskRecency);
+  }, [tasks]);
+
   const statusSummary = useMemo(() => {
     if (!resolvedTask) return "Idle";
     const statusText = humanizeStatus(resolvedTask.status);
@@ -242,7 +262,7 @@ export function ChatInterface({ initialTasks, initialGitHubAuth }: ChatInterface
     return () => window.removeEventListener("resize", syncPane);
   }, []);
 
-    const hasActiveTasks = orderedTasks.length > 0;
+  const hasActiveTasks = activeTasks.length > 0;
 
   useEffect(() => {
     if (hasActiveTasks) {
@@ -366,6 +386,22 @@ export function ChatInterface({ initialTasks, initialGitHubAuth }: ChatInterface
     []
   );
 
+  const handleRestoreTask = useCallback(
+    (taskId: string) => {
+      setFocusedEventId(undefined);
+      setActiveTaskId(taskId);
+      setHasActivatedFullUI(true);
+      setIsHistoryOpen(false);
+      if (typeof window !== "undefined" && window.innerWidth < 1280) {
+        setMobilePane("chat");
+        setShowConversation(false);
+      } else {
+        setShowConversation(true);
+      }
+    },
+    []
+  );
+
   const handleGitHubAuthChange = useCallback((state: GitHubAuthState) => {
     setGitHubAuth(state);
   }, []);
@@ -397,6 +433,36 @@ export function ChatInterface({ initialTasks, initialGitHubAuth }: ChatInterface
 
   const ConversationPanel = ({ highlightEventId }: { highlightEventId?: string }) => {
     const highlightRef = useRef<HTMLDivElement | null>(null);
+    const listRef = useRef<HTMLDivElement | null>(null);
+    const scrollStateRef = useRef({
+      scrollTop: 0,
+      scrollHeight: 0,
+      eventCount: events.length
+    });
+
+    useLayoutEffect(() => {
+      const container = listRef.current;
+      if (!container) return;
+      const previous = scrollStateRef.current;
+      if (previous.eventCount !== events.length) {
+        container.scrollTop = previous.scrollTop;
+      }
+      scrollStateRef.current = {
+        scrollTop: container.scrollTop,
+        scrollHeight: container.scrollHeight,
+        eventCount: events.length
+      };
+    }, [events.length]);
+
+    const recordScrollPosition = useCallback(() => {
+      const container = listRef.current;
+      if (!container) return;
+      scrollStateRef.current = {
+        ...scrollStateRef.current,
+        scrollTop: container.scrollTop,
+        scrollHeight: container.scrollHeight
+      };
+    }, []);
 
     useEffect(() => {
       if (!highlightEventId) {
@@ -405,6 +471,14 @@ export function ChatInterface({ initialTasks, initialGitHubAuth }: ChatInterface
       }
       if (highlightRef.current) {
         highlightRef.current.scrollIntoView({ behavior: "smooth", block: "center" });
+        const container = listRef.current;
+        if (container) {
+          scrollStateRef.current = {
+            scrollTop: container.scrollTop,
+            scrollHeight: container.scrollHeight,
+            eventCount: events.length
+          };
+        }
       }
     }, [highlightEventId, events.length]);
 
@@ -426,7 +500,11 @@ export function ChatInterface({ initialTasks, initialGitHubAuth }: ChatInterface
         </div>
       </div>
 
-      <div className="scrollbar flex-1 overflow-y-auto px-5 py-5">
+      <div
+        ref={listRef}
+        onScroll={recordScrollPosition}
+        className="scrollbar flex-1 overflow-y-auto px-5 py-5"
+      >
         <div className="flex flex-col gap-3">
           {displayedEvents.map((event) => {
             const isAgent = event.tone === "agent";
@@ -531,36 +609,60 @@ export function ChatInterface({ initialTasks, initialGitHubAuth }: ChatInterface
                 </button>
               </div>
               <div className="mt-3 space-y-2">
-                {orderedTasks.length === 0 ? (
-                  <button
-                    type="button"
-                    onClick={() => setIsCreateOpen(true)}
-                    className="w-full rounded-2xl border border-dashed border-neutral-700 px-4 py-6 text-center text-xs text-neutral-500 transition hover:border-neutral-500 hover:text-white"
-                  >
-                    No active tasks · Create one
-                  </button>
-                ) : (
-                  orderedTasks.map((taskItem) => {
-                    const isActive = taskItem.id === activeTaskId;
-                    return (
-                      <button
-                        key={taskItem.id}
-                        type="button"
-                        onClick={() => setActiveTaskId(taskItem.id)}
-                        className={clsx(
-                          "w-full rounded-2xl border px-4 py-3 text-left transition",
-                          isActive
-                            ? "border-emerald-400/50 bg-emerald-500/10 text-white"
-                            : "border-neutral-800 bg-neutral-950 text-neutral-300 hover:border-neutral-600 hover:text-white"
-                        )}
-                      >
-                        <p className="truncate text-sm font-semibold">{taskItem.title}</p>
-                        <p className="mt-1 text-[10px] uppercase tracking-[0.25em] text-neutral-500">
-                          {humanizeStatus(taskItem.status)}
-                        </p>
+                {hasActiveTasks ? (
+                  <>
+                    {activeTasks.map((taskItem) => {
+                      const isActive = taskItem.id === activeTaskId;
+                      return (
+                        <button
+                          key={taskItem.id}
+                          type="button"
+                          onClick={() => setActiveTaskId(taskItem.id)}
+                          className={clsx(
+                            "w-full rounded-2xl border px-4 py-3 text-left transition",
+                            isActive
+                              ? "border-emerald-400/50 bg-emerald-500/10 text-white"
+                              : "border-neutral-800 bg-neutral-950 text-neutral-300 hover:border-neutral-600 hover:text-white"
+                          )}
+                        >
+                          <p className="truncate text-sm font-semibold">{taskItem.title}</p>
+                          <p className="mt-1 text-[10px] uppercase tracking-[0.25em] text-neutral-500">
+                            {humanizeStatus(taskItem.status)}
+                          </p>
                       </button>
-                    );
-                  })
+                      );
+                    })}
+                    {historicalTasks.length > 0 ? (
+                      <button
+                        type="button"
+                        onClick={() => setIsHistoryOpen(true)}
+                        className="w-full rounded-2xl border border-neutral-800 bg-neutral-950 px-4 py-2 text-center text-[10px] uppercase tracking-[0.2em] text-neutral-400 transition hover:border-neutral-600 hover:text-white"
+                      >
+                        Browse recent task runs
+                      </button>
+                    ) : null}
+                  </>
+                ) : (
+                  <div className="space-y-3">
+                    <p className="text-[11px] uppercase tracking-[0.25em] text-neutral-600">
+                    </p>
+                    <button
+                      type="button"
+                      onClick={() => setIsCreateOpen(true)}
+                      className="w-full rounded-2xl border border-dashed border-neutral-700 px-4 py-6 text-center text-xs text-neutral-500 transition hover:border-neutral-500 hover:text-white"
+                    >
+                      Create a task
+                    </button>
+                    {historicalTasks.length > 0 ? (
+                      <button
+                        type="button"
+                        onClick={() => setIsHistoryOpen(true)}
+                        className="w-full rounded-2xl border border-neutral-800 bg-neutral-950 px-4 py-3 text-center text-xs text-neutral-300 transition hover:border-neutral-600 hover:text-white"
+                      >
+                        Browse recent task runs
+                      </button>
+                    ) : null}
+                  </div>
                 )}
                 {creationMessage ? (
                   <p className={clsx("text-xs", creationMessageClass)}>{creationMessage}</p>
@@ -749,8 +851,77 @@ export function ChatInterface({ initialTasks, initialGitHubAuth }: ChatInterface
               </button>
             </div>
           </form>
+          {historicalTasks.length > 0 ? (
+            <div className="flex flex-col items-center gap-3 rounded-3xl border border-neutral-800 bg-neutral-950/50 p-6 text-center shadow-xl backdrop-blur">
+              <p className="text-sm text-neutral-400">
+                Need to revisit something you already shipped?
+              </p>
+              <button
+                type="button"
+                onClick={() => setIsHistoryOpen(true)}
+                className="inline-flex items-center justify-center rounded-full border border-neutral-700 px-5 py-2 text-xs font-semibold text-neutral-200 transition hover:border-neutral-500 hover:text-white"
+              >
+                Browse recent task runs
+              </button>
+            </div>
+          ) : null}
         </div>
       )}
+
+      {isHistoryOpen ? (
+        <div className="fixed inset-0 z-50 flex items-center justify-center px-4 py-10">
+          <div
+            className="absolute inset-0 bg-black/60 backdrop-blur-sm"
+            onClick={() => setIsHistoryOpen(false)}
+          />
+          <div className="relative flex w-full max-w-2xl flex-col overflow-hidden rounded-3xl border border-neutral-800 bg-neutral-950 shadow-2xl">
+            <div className="flex items-center justify-between border-b border-neutral-800 px-5 py-4">
+              <div>
+                <p className="text-xs uppercase tracking-[0.35em] text-neutral-500">Recent task runs</p>
+                <p className="mt-1 text-sm text-neutral-300">Reopen a task to view its conversation and artifacts.</p>
+              </div>
+              <button
+                type="button"
+                onClick={() => setIsHistoryOpen(false)}
+                className="rounded-full border border-neutral-800 px-3 py-1 text-xs text-neutral-400 transition hover:border-neutral-600 hover:text-white"
+              >
+                Close
+              </button>
+            </div>
+            <div className="scrollbar max-h-[60vh] overflow-y-auto px-5 py-5">
+              {historicalTasks.length === 0 ? (
+                <div className="rounded-2xl border border-dashed border-neutral-700 px-6 py-10 text-center text-sm text-neutral-500">
+                  No completed tasks yet. Create one to get started.
+                </div>
+              ) : (
+                <div className="space-y-2">
+                  {historicalTasks.map((taskItem) => (
+                    <button
+                      key={taskItem.id}
+                      type="button"
+                      onClick={() => handleRestoreTask(taskItem.id)}
+                      className="w-full rounded-2xl border border-neutral-800 bg-neutral-950 px-4 py-3 text-left text-neutral-300 transition hover:border-neutral-600 hover:text-white"
+                    >
+                      <div className="flex flex-wrap items-center justify-between gap-x-4 gap-y-1">
+                        <p className="truncate text-sm font-semibold text-white">{taskItem.title}</p>
+                        <span className="rounded-full border border-neutral-700 px-3 py-1 text-[10px] uppercase tracking-[0.3em] text-neutral-400">
+                          {humanizeStatus(taskItem.status)}
+                        </span>
+                      </div>
+                      {taskItem.description ? (
+                        <p className="mt-2 line-clamp-2 text-xs text-neutral-500">{taskItem.description}</p>
+                      ) : null}
+                      <p className="mt-2 text-[10px] uppercase tracking-[0.25em] text-neutral-500">
+                        Updated {new Date(taskItem.updatedAt ?? taskItem.createdAt).toLocaleString()}
+                      </p>
+                    </button>
+                  ))}
+                </div>
+              )}
+            </div>
+          </div>
+        </div>
+      ) : null}
 
       {showConversation ? (
         <div className="fixed inset-0 z-50 hidden items-center justify-center px-6 py-10 xl:flex">
