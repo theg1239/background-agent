@@ -4,7 +4,7 @@ import { taskStore } from "@/lib/server/task-store";
 export const revalidate = 0;
 
 export default async function Home() {
-  const tasks = taskStore.listTasks();
+  const tasks = await taskStore.listTasks();
 
   return (
     <main className="min-h-screen bg-gradient-to-br from-slate-950 via-slate-900 to-slate-950 px-6 py-12 text-zinc-100">

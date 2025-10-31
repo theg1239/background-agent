@@ -9,7 +9,7 @@ export async function GET(
   { params }: { params: { taskId: string } }
 ) {
   const { taskId } = params;
-  const snapshot = taskStore.getEventStreamSnapshot(taskId);
+  const snapshot = await taskStore.getEventStreamSnapshot(taskId);
   if (!snapshot) {
     return new NextResponse(null, { status: 404 });
   }

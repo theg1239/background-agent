@@ -23,6 +23,7 @@ Create `.env.local` (never commit secrets):
 
 ```bash
 TASK_API_TOKEN="local-dev-token"   # Optional; set to enforce auth for internal routes
+REDIS_URL="redis://localhost:6379" # Shared Redis instance for queue + task store
 ```
 
 When deploying to Vercel, set `TASK_API_TOKEN` in the project settings so internal API endpoints require bearer auth from workers.
@@ -38,12 +39,17 @@ GOOGLE_GENERATIVE_AI_API_KEY="..."
 QUEUE_POLL_INTERVAL_MS=2500            # optional
 WORKER_MAX_CONCURRENCY=2               # optional
 WORKER_ID="dev-worker-1"              # optional
+WORKSPACES_DIR="/tmp/background-agent" # optional, defaults to .agent-workspaces
+PERSIST_WORKSPACES=false               # set true to keep workspaces for debugging
 ```
 
 ## Install & Run Locally
 
 ```bash
 pnpm install
+
+# Start Redis (Docker example)
+docker run --rm -p 6379:6379 redis:7
 
 # Start the Next.js app
 yarn --cwd apps/web dev      # or `pnpm --filter web dev`
@@ -57,9 +63,9 @@ The worker polls `/api/internal/worker/tasks` to claim tasks, executes an agent 
 ## How It Works
 
 1. **Task creation** – Users submit title/description/repo URL from the dashboard.
-2. **In-memory queue** – Web API enqueues tasks and exposes claim/ack endpoints for workers.
-3. **Agent execution** – Worker uses AI SDK 6 `ToolLoopAgent` with Gemini 2.5 Pro to plan, log, and update status. Tool invocations post structured events back to the API.
-4. **Event streaming** – Frontend subscribes via Server-Sent Events (`/api/tasks/:id/events`) to replay historical and live updates. UI displays plan, status, and log timeline.
+2. **Redis-backed queue** – Web API enqueues tasks and exposes claim/ack endpoints backed by Redis leases so work survives restarts.
+3. **Agent execution** – Worker uses AI SDK 6 `ToolLoopAgent` with Gemini 2.5 Pro to plan, log, and update status while manipulating a local Git workspace (clone, read/write files, run commands).
+4. **Event streaming** – Frontend subscribes via Server-Sent Events (`/api/tasks/:id/events`) to replay historical and live updates. UI displays plan, status, log timeline, and generated artifacts like git diffs.
 5. **Completion** – Agent emits `task.completed` (or `task.failed`) and the worker ACKs the queue item.
 
 ## Deployment Notes
@@ -71,7 +77,7 @@ The worker polls `/api/internal/worker/tasks` to claim tasks, executes an agent 
 
 ## Next Steps
 
-- Persist tasks/events in Postgres instead of in-memory maps.
+- Persist tasks/events in Postgres instead of Redis JSON blobs if you need relational queries.
 - Add approval gates and artifact uploads from the worker.
 - Implement resumable UI streams with storage-backed cursoring for long histories.
 - Harden error handling (retry policies, exponential backoff, dead-letter queue).

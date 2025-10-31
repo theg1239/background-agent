@@ -20,7 +20,7 @@ export async function POST(
   }
 
   try {
-    taskStore.appendEvent(params.taskId, parsed.data);
+    await taskStore.appendEvent(params.taskId, parsed.data);
     return NextResponse.json({ ok: true }, { status: 201 });
   } catch (error) {
     return NextResponse.json({ error: (error as Error).message }, { status: 404 });

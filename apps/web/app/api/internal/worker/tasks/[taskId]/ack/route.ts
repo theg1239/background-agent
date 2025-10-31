@@ -17,11 +17,10 @@ export async function POST(
   const requeue = Boolean(body?.requeue);
 
   if (requeue) {
-    taskQueue.release(params.taskId);
-    taskQueue.enqueue(params.taskId);
-    taskStore.updateStatus(params.taskId, "queued");
+    await taskQueue.requeue(params.taskId);
+    await taskStore.updateStatus(params.taskId, "queued");
   } else {
-    taskQueue.ack(params.taskId);
+    await taskQueue.ack(params.taskId);
   }
 
   return NextResponse.json({ ok: true });

@@ -1,66 +1,91 @@
+import { CreateTaskInput, Task } from "@background-agent/shared";
+import { getRedis } from "./redis";
 import { taskStore } from "./task-store";
 
-type QueueItem = {
-  taskId: string;
-  enqueuedAt: number;
-};
+const QUEUE_KEY = "tasks:queue";
+const LEASE_HASH_KEY = "tasks:leases";
+const LEASE_ZSET_KEY = "tasks:lease_expirations";
+const LEASE_MS = 60_000;
 
-type Lease = {
-  workerId: string;
-  leasedAt: number;
-};
+interface TaskClaim {
+  task: Task;
+  input: CreateTaskInput;
+}
 
 class TaskQueue {
-  private queue: QueueItem[] = [];
-  private leases = new Map<string, Lease>();
+  private redis = getRedis();
 
-  enqueue(taskId: string) {
-    // avoid duplicates in queue if already enqueued or leased
-    if (this.queue.some((item) => item.taskId === taskId) || this.leases.has(taskId)) {
+  async enqueue(taskId: string) {
+    const alreadyQueued = await this.redis.lpos(QUEUE_KEY, taskId).catch(() => null);
+    const leaseExists = (await this.redis.hexists(LEASE_HASH_KEY, taskId)) === 1;
+    if (alreadyQueued !== null || leaseExists) {
       return;
     }
-
-    this.queue.push({
-      taskId,
-      enqueuedAt: Date.now()
-    });
+    await this.redis.rpush(QUEUE_KEY, taskId);
   }
 
-  claim(workerId: string) {
-    while (this.queue.length > 0) {
-      const next = this.queue.shift();
-      if (!next) break;
-      const task = taskStore.getTaskWithEvents(next.taskId);
-      if (!task) {
+  async claim(workerId: string): Promise<TaskClaim | undefined> {
+    await this.requeueLeases();
+
+    while (true) {
+      const taskId = await this.redis.lpop(QUEUE_KEY);
+      if (!taskId) {
+        return undefined;
+      }
+
+      const now = Date.now();
+      const leaseData = JSON.stringify({ workerId, leasedAt: now });
+      const acquired = await this.redis.hsetnx(LEASE_HASH_KEY, taskId, leaseData);
+      if (acquired === 0) {
         continue;
       }
-      if (this.leases.has(next.taskId)) {
+
+      await this.redis.zadd(LEASE_ZSET_KEY, now + LEASE_MS, taskId);
+
+      const record = await taskStore.getTaskForWorker(taskId);
+      if (!record) {
+        await this.redis.hdel(LEASE_HASH_KEY, taskId);
+        await this.redis.zrem(LEASE_ZSET_KEY, taskId);
         continue;
       }
-      this.leases.set(next.taskId, {
-        workerId,
-        leasedAt: Date.now()
-      });
-      return task;
+
+      return record;
     }
-    return undefined;
   }
 
-  release(taskId: string) {
-    this.leases.delete(taskId);
+  async release(taskId: string) {
+    await this.redis.multi().hdel(LEASE_HASH_KEY, taskId).zrem(LEASE_ZSET_KEY, taskId).exec();
   }
 
-  ack(taskId: string) {
-    this.leases.delete(taskId);
+  async ack(taskId: string) {
+    await this.redis
+      .multi()
+      .hdel(LEASE_HASH_KEY, taskId)
+      .zrem(LEASE_ZSET_KEY, taskId)
+      .exec();
   }
 
-  requeueLeases(maxLeaseMs: number) {
+  async requeue(taskId: string) {
+    await this.redis
+      .multi()
+      .hdel(LEASE_HASH_KEY, taskId)
+      .zrem(LEASE_ZSET_KEY, taskId)
+      .exec();
+    await this.enqueue(taskId);
+  }
+
+  async requeueLeases() {
     const now = Date.now();
-    for (const [taskId, lease] of this.leases.entries()) {
-      if (now - lease.leasedAt > maxLeaseMs) {
-        this.leases.delete(taskId);
-        this.enqueue(taskId);
-      }
+    const expiredTaskIds = await this.redis.zrangebyscore(LEASE_ZSET_KEY, 0, now);
+    if (expiredTaskIds.length === 0) return;
+
+    for (const taskId of expiredTaskIds) {
+      await this.redis
+        .multi()
+        .hdel(LEASE_HASH_KEY, taskId)
+        .zrem(LEASE_ZSET_KEY, taskId)
+        .exec();
+      await this.enqueue(taskId);
     }
   }
 }

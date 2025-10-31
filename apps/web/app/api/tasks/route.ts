@@ -4,7 +4,7 @@ import { taskStore } from "@/lib/server/task-store";
 import { enqueueTaskExecution } from "@/lib/server/worker-dispatch";
 
 export async function GET() {
-  const tasks = taskStore.listTasks();
+  const tasks = await taskStore.listTasks();
   return NextResponse.json({ tasks });
 }
 
@@ -15,7 +15,7 @@ export async function POST(request: NextRequest) {
     return NextResponse.json({ error: parseResult.error.flatten() }, { status: 400 });
   }
 
-  const task = taskStore.createTask(parseResult.data);
+  const task = await taskStore.createTask(parseResult.data);
   await enqueueTaskExecution(task, parseResult.data);
   return NextResponse.json({ task }, { status: 201 });
 }

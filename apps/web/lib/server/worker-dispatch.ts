@@ -8,9 +8,8 @@ const globalDispatch = globalThis as unknown as {
 
 class WorkerDispatcher {
   async enqueue(task: Task, input: CreateTaskInput) {
-    // simple in-memory queue for local/dev use
-    taskStore.updateStatus(task.id, "queued");
-    taskQueue.enqueue(task.id);
+    await taskStore.updateStatus(task.id, "queued");
+    await taskQueue.enqueue(task.id);
   }
 }
 
