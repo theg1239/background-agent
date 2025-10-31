@@ -5,7 +5,9 @@ import {
   Task,
   TaskEvent,
   TaskEventStreamSnapshot,
-  TASK_EVENT_TYPES
+  TASK_EVENT_TYPES,
+  TaskPlanStepSchema,
+  TaskStatusSchema
 } from "@background-agent/shared";
 
 interface Options {
@@ -55,14 +57,16 @@ export function useTaskEvents(taskId?: string, options?: Options) {
         }
         return [...prev, parsed].sort((a, b) => a.timestamp - b.timestamp);
       });
-      const statusUpdate = parsed.payload?.status;
-      if (typeof statusUpdate === "string") {
-        setTask((prev) => (prev ? { ...prev, status: statusUpdate } : prev));
+      const statusResult = TaskStatusSchema.safeParse(parsed.payload?.status);
+      if (statusResult.success) {
+        const nextStatus = statusResult.data;
+        setTask((prev) => (prev ? { ...prev, status: nextStatus } : prev));
       }
 
-      const planUpdate = parsed.payload?.plan;
-      if (Array.isArray(planUpdate)) {
-        setTask((prev) => (prev ? { ...prev, plan: planUpdate } : prev));
+      const planResult = TaskPlanStepSchema.array().safeParse(parsed.payload?.plan);
+      if (planResult.success) {
+        const nextPlan = planResult.data;
+        setTask((prev) => (prev ? { ...prev, plan: nextPlan } : prev));
       }
     };
 

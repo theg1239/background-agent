@@ -1,4 +1,4 @@
-import { TaskQueue } from "@background-agent/shared/task-queue";
+import { TaskQueue } from "@background-agent/shared";
 import { redis } from "./redis";
 import { taskStore } from "./task-store";
 
