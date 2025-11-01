@@ -43,7 +43,6 @@ export async function runTaskWithAgent({
   notifyTaskEvent
 }: RunTaskOptions) {
   const workspace = await Workspace.prepare(task.id);
-  const fallbackSummaryMessage = `Plan ready for "${task.title}" — no repository changes yet. Review the plan and provide next steps when you're ready for implementation.`;
 
   const broadcastFileUpdate = async (
     path: string,
@@ -218,186 +217,209 @@ export async function runTaskWithAgent({
 
     let planWasUpdated = false;
 
+    // --- Tool definitions (unchanged behavior) ---
+    const toolsAll = {
+      updatePlan: tool({
+        description: "Update the execution plan with the latest steps and statuses.",
+        inputSchema: z.object({
+          steps: z.array(planStepInputSchema).min(1, "Provide at least one plan step."),
+          note: z.string().optional()
+        }),
+        execute: async ({ steps, note }) => {
+          const normalized = normalizeSteps(
+            steps.map((step) => ({
+              id: step.id,
+              title: step.title,
+              summary: step.summary,
+              status: step.status ?? "pending"
+            }))
+          );
+
+          planWasUpdated = true;
+          const event = {
+            id: randomUUID(),
+            taskId: task.id,
+            type: "plan.updated",
+            timestamp: Date.now(),
+            payload: {
+              plan: normalized,
+              note
+            }
+          } satisfies TaskEvent;
+          await store.appendEvent(task.id, event);
+          await notifyTaskEvent?.(task.id, event);
+          return { acknowledged: true };
+        }
+      }),
+      logProgress: tool({
+        description: "Log progress messages for the human operator.",
+        inputSchema: z.object({
+          level: z.enum(["info", "warning", "error"]).default("info"),
+          message: z.string()
+        }),
+        execute: async ({ level, message }) => {
+          await emitLog(level, message);
+          return { acknowledged: true };
+        }
+      }),
+      setStatus: tool({
+        description: "Set the overall task status when you transition between phases.",
+        inputSchema: z.object({
+          status: TaskStatusSchema,
+          reason: z.string().optional()
+        }),
+        execute: async ({ status, reason }) => {
+          await updateStatus(status, reason);
+          return { acknowledged: true };
+        }
+      }),
+      readFile: tool({
+        description: "Read a UTF-8 file from the workspace",
+        inputSchema: z.object({
+          path: z.string()
+        }),
+        execute: async ({ path }) => {
+          const contents = await workspace.readFile(path);
+          return { path, contents };
+        }
+      }),
+      writeFile: tool({
+        description: "Write a UTF-8 file inside the workspace",
+        inputSchema: z.object({
+          path: z.string(),
+          contents: z.string()
+        }),
+        execute: async ({ path, contents }) => {
+          let previousContents: string | undefined;
+          try {
+            previousContents = await workspace.readFile(path);
+          } catch (error) {
+            if ((error as NodeJS.ErrnoException).code !== "ENOENT") {
+              await emitLog("warning", `Failed to read existing contents of ${path}: ${(error as Error).message}`);
+            }
+          }
+
+          const result = await workspace.writeFile(path, contents);
+          await emitLog("info", `Updated file ${path} (${result.bytes} bytes)`);
+
+          await broadcastFileUpdate(path, contents, previousContents ?? null, {
+            byteLength: result.bytes
+          });
+
+          return result;
+        }
+      }),
+      listFiles: tool({
+        description: "List files relative to the workspace root",
+        inputSchema: z.object({
+          path: z.string().default("."),
+          limit: z.number().min(1).max(500).default(200)
+        }),
+        execute: async ({ path, limit }) => {
+          const files = await workspace.listFiles(path, limit);
+          return { files };
+        }
+      }),
+      riggrep: tool({
+        description: "Search for text in the workspace using ripgrep (fast code search).",
+        inputSchema: z.object({
+          pattern: z.string(),
+          path: z.string().default("."),
+          regex: z.boolean().default(false),
+          caseSensitive: z.boolean().optional(),
+          glob: z.array(z.string()).optional(),
+          context: z.number().min(0).max(10).default(2),
+          maxMatches: z.number().min(1).max(200).default(100)
+        }),
+        execute: async ({ pattern, path, regex, caseSensitive, glob, context, maxMatches }) => {
+          const result = await workspace.searchRipgrep(pattern, {
+            path,
+            regex,
+            caseSensitive,
+            glob,
+            context,
+            maxMatches
+          });
+          await emitLog(
+            "info",
+            `riggrep located ${result.matches.length} of ${result.totalMatches} matches for "${pattern}".`
+          );
+          return result;
+        }
+      }),
+      runCommand: tool({
+        description: "Run a shell command inside the workspace",
+        inputSchema: z.object({
+          command: z.string(),
+          timeoutMs: z.number().min(1_000).max(300_000).optional()
+        }),
+        execute: async ({ command, timeoutMs }) => {
+          const result = await workspace.runCommand(command, { timeoutMs });
+          await emitLog("info", `Ran command: ${command}`);
+          return result;
+        }
+      }),
+      gitDiff: tool({
+        description: "Return the current git diff for the workspace",
+        inputSchema: z.object({}),
+        execute: async () => {
+          const diff = await workspace.getDiff();
+          return { diff };
+        }
+      }),
+      gitStatus: tool({
+        description: "Show the current git status (branch, staged, unstaged, untracked files).",
+        inputSchema: z.object({}),
+        execute: async () => {
+          try {
+            const status = await workspace.getStatus();
+            return { status };
+          } catch (error) {
+            const message =
+              (error as Error).message ?? "Failed to read git status for the workspace.";
+            await emitLog("warning", `gitStatus tool failed: ${message}`);
+            return { status: "", error: message };
+          }
+        }
+      })
+    } as const;
+
+    // Subset exposed for plan-first step:
+    const toolsPlanOnly = {
+      updatePlan: toolsAll.updatePlan,
+      logProgress: toolsAll.logProgress,
+      setStatus: toolsAll.setStatus
+    } as const;
+
     const buildAgent = (languageModel: LanguageModel) =>
       new ToolLoopAgent({
         model: languageModel,
         instructions: `You are an autonomous senior software engineer inside a background task runner.
 - Always maintain an explicit execution plan.
-- Use the provided tools to update the plan, log progress, change task status, and work with the repository.
 - Decompose work into small, verifiable steps and validate each change.
-- Use riggrep for fast code search and gitStatus to keep the repository state visible.
-- Start by creating a plan, then proceed with implementation in the same run. You can plan and implement immediately for: small bug fixes, adding new files to empty repos, documentation updates, configuration changes, or analysis tasks.
-- Never fabricate repository results; if you need external context, request human input via logs.
-- Do not mark the task complete until you have produced concrete artifacts (code changes, documentation updates, or a detailed security report) that justify completion.`,
+- Start by publishing an execution plan via the "updatePlan" tool, then proceed with implementation in this same run.
+- Use repo tools (readFile/writeFile/listFiles/riggrep/gitStatus/gitDiff/runCommand) to gather evidence and modify files.
+- Do not mark completion unless you produced concrete artifacts (code diffs, files) to justify closure.`,
+        tools: toolsAll,
+        // Hard ceiling; loop stops if this limit is hit.
         stopWhen: stepCountIs(config.agentStepLimit),
-        tools: {
-          updatePlan: tool({
-            description: "Update the execution plan with the latest steps and statuses.",
-            inputSchema: z.object({
-              steps: z
-                .array(planStepInputSchema)
-                .min(1, "Provide at least one plan step."),
-              note: z.string().optional()
-            }),
-            execute: async ({ steps, note }) => {
-              const normalized = normalizeSteps(
-                steps.map((step) => ({
-                  id: step.id,
-                  title: step.title,
-                  summary: step.summary,
-                  status: step.status ?? "pending"
-                }))
-              );
-
-              planWasUpdated = true;
-              const event = {
-                id: randomUUID(),
-                taskId: task.id,
-                type: "plan.updated",
-                timestamp: Date.now(),
-                payload: {
-                  plan: normalized,
-                  note
-                }
-              } satisfies TaskEvent;
-              await store.appendEvent(task.id, event);
-              await notifyTaskEvent?.(task.id, event);
-              return { acknowledged: true };
-            }
-          }),
-        logProgress: tool({
-          description: "Log progress messages for the human operator.",
-          inputSchema: z.object({
-            level: z.enum(["info", "warning", "error"]).default("info"),
-            message: z.string()
-          }),
-          execute: async ({ level, message }) => {
-            await emitLog(level, message);
-            return { acknowledged: true };
+        // Force a plan on step 0; then allow normal execution.
+        prepareStep: async ({ stepNumber }) => {
+          if (stepNumber === 0 && !planWasUpdated) {
+            // Narrow available tools and force the model to call updatePlan first.
+            return {
+              tools: toolsPlanOnly,
+              toolChoice: { type: "tool", toolName: "updatePlan" }
+            };
           }
-        }),
-        setStatus: tool({
-          description: "Set the overall task status when you transition between phases.",
-          inputSchema: z.object({
-            status: TaskStatusSchema,
-            reason: z.string().optional()
-          }),
-          execute: async ({ status, reason }) => {
-            await updateStatus(status, reason);
-            return { acknowledged: true };
+          if (!planWasUpdated) {
+            // Until the plan exists, require tool usage (prevents "just text" replies).
+            return { toolChoice: "required" as const };
           }
-        }),
-        readFile: tool({
-          description: "Read a UTF-8 file from the workspace",
-          inputSchema: z.object({
-            path: z.string()
-          }),
-          execute: async ({ path }) => {
-            const contents = await workspace.readFile(path);
-            return { path, contents };
-          }
-        }),
-        writeFile: tool({
-          description: "Write a UTF-8 file inside the workspace",
-          inputSchema: z.object({
-            path: z.string(),
-            contents: z.string()
-          }),
-          execute: async ({ path, contents }) => {
-            let previousContents: string | undefined;
-            try {
-              previousContents = await workspace.readFile(path);
-            } catch (error) {
-              if ((error as NodeJS.ErrnoException).code !== "ENOENT") {
-                await emitLog("warning", `Failed to read existing contents of ${path}: ${(error as Error).message}`);
-              }
-            }
-
-            const result = await workspace.writeFile(path, contents);
-            await emitLog("info", `Updated file ${path} (${result.bytes} bytes)`);
-
-            await broadcastFileUpdate(path, contents, previousContents ?? null, {
-              byteLength: result.bytes
-            });
-
-            return result;
-          }
-        }),
-        listFiles: tool({
-          description: "List files relative to the workspace root",
-          inputSchema: z.object({
-            path: z.string().default("."),
-            limit: z.number().min(1).max(500).default(200)
-          }),
-          execute: async ({ path, limit }) => {
-            const files = await workspace.listFiles(path, limit);
-            return { files };
-          }
-        }),
-        riggrep: tool({
-          description: "Search for text in the workspace using ripgrep (fast code search).",
-          inputSchema: z.object({
-            pattern: z.string(),
-            path: z.string().default("."),
-            regex: z.boolean().default(false),
-            caseSensitive: z.boolean().optional(),
-            glob: z.array(z.string()).optional(),
-            context: z.number().min(0).max(10).default(2),
-            maxMatches: z.number().min(1).max(200).default(100)
-          }),
-          execute: async ({ pattern, path, regex, caseSensitive, glob, context, maxMatches }) => {
-            const result = await workspace.searchRipgrep(pattern, {
-              path,
-              regex,
-              caseSensitive,
-              glob,
-              context,
-              maxMatches
-            });
-            await emitLog(
-              "info",
-              `riggrep located ${result.matches.length} of ${result.totalMatches} matches for "${pattern}".`
-            );
-            return result;
-          }
-        }),
-        runCommand: tool({
-          description: "Run a shell command inside the workspace",
-          inputSchema: z.object({
-            command: z.string(),
-            timeoutMs: z.number().min(1_000).max(300_000).optional()
-          }),
-          execute: async ({ command, timeoutMs }) => {
-            const result = await workspace.runCommand(command, { timeoutMs });
-            await emitLog("info", `Ran command: ${command}`);
-            return result;
-          }
-        }),
-        gitDiff: tool({
-          description: "Return the current git diff for the workspace",
-          inputSchema: z.object({}),
-          execute: async () => {
-            const diff = await workspace.getDiff();
-            return { diff };
-          }
-        }),
-        gitStatus: tool({
-          description: "Show the current git status (branch, staged, unstaged, untracked files).",
-          inputSchema: z.object({}),
-          execute: async () => {
-            try {
-              const status = await workspace.getStatus();
-              return { status };
-            } catch (error) {
-              const message =
-                (error as Error).message ?? "Failed to read git status for the workspace.";
-              await emitLog("warning", `gitStatus tool failed: ${message}`);
-              return { status: "", error: message };
-            }
-          }
-        })
-      }
-    });
+          // After plan exists, allow normal behavior.
+          return {};
+        }
+      });
 
     await updateStatus("executing", "Plan execution started");
     const basePrompt = `You are working on task "${task.title}" as an autonomous senior software engineer embedded in a background worker.
@@ -409,7 +431,7 @@ Context
 - Working branch: ${input.branch ?? "(not specified)"} (base: ${input.baseBranch ?? "main"}).
 
 Operating Principles
-1. Ship tangible value on every run—prefer concise, high-utility diffs or substantive written deliverables.
+1. Ship tangible value on every run—prefer concise, high-utility diffs or substantive written deliverables tied to the repo.
 2. Maintain an explicit, evolving execution plan; never let the plan fall out of sync with reality.
 3. Validate assumptions through repository inspection and commands rather than speculation.
 4. Surface blockers early via log entries or status updates; do not silently stall.
@@ -423,13 +445,12 @@ Process Expectations
 - Exercise repository tools (readFile/writeFile/listFiles/runCommand/riggrep/gitDiff/gitStatus) to gather evidence and modify files efficiently.
 
 Quality Bar & Validation
-- Run relevant tests or checks when practical; if impractical, explain why and describe alternate validation.
+- Run relevant checks when practical; if impractical, explain why and describe alternate validation.
 - Before finishing, review the gitDiff output to ensure the artifacts align with the task intent.
-- If work produces no code changes, create documentation updates or a concrete security/quality report instead of exiting silently.
+- If work produces no code changes, produce a concrete artifact in the repo (e.g., README or report) instead of exiting silently.
 
 Deliverables
-- A final summary that highlights implemented changes, validation performed, and recommended next steps.
-- Any supporting documentation or reports needed to justify the closure of the task.
+- A final summary message that highlights implemented changes, validation performed, and recommended next steps.
 
 Begin by emitting the initial execution plan described above.`;
 
@@ -457,8 +478,7 @@ Begin by emitting the initial execution plan described above.`;
           const content = (last as any)?.content;
           if (typeof content === "string") return content;
         }
-      } catch {
-      }
+      } catch {}
       return "";
     };
 
@@ -499,7 +519,6 @@ Begin by emitting the initial execution plan described above.`;
         const agent = buildAgent(handle.model as unknown as LanguageModel);
         try {
           const result = await agent.generate({ prompt });
-          // Ensure a plain string `text` property exists when possible
           const normalizedText = await coerceText(result);
           reportGeminiSuccess(handle);
           return { ...result, text: normalizedText };
@@ -533,7 +552,21 @@ Begin by emitting the initial execution plan described above.`;
     let refinedBrief = "";
     try {
       await emitLog("info", "Refining task prompt and constraints...");
-      const refinePrompt = `You are a prompt refinement assistant for a background coding agent. Rewrite and clarify the task below into a concise \"Refined Brief\" with:\n\n- Objectives (3-5 bullet points)\n- Assumptions (explicit, reasonable)\n- Constraints and non-goals\n- Deliverables (what counts as \"done\")\n- Validation plan (how to verify)\n\nKeep it under 200 words, in markdown. Do not include code. Avoid speculation about the repo beyond what is given.\n\nTask title: ${task.title}\nTask description: ${task.description ?? "(none provided)"}\nRepository URL: ${input.repoUrl ?? "(not supplied)"}\nConstraints: ${(input.constraints ?? []).join("; ") || "None"}\nWorking branch: ${input.branch ?? "(not specified)"} (base: ${input.baseBranch ?? "main"})`;
+      const refinePrompt = `You are a prompt refinement assistant for a background coding agent. Rewrite and clarify the task below into a concise "Refined Brief" with:
+
+- Objectives (3-5 bullet points)
+- Assumptions (explicit, reasonable)
+- Constraints and non-goals
+- Deliverables (what counts as "done")
+- Validation plan (how to verify)
+
+Keep it under 200 words, in markdown. Do not include code. Avoid speculation about the repo beyond what is given.
+
+Task title: ${task.title}
+Task description: ${task.description ?? "(none provided)"}
+Repository URL: ${input.repoUrl ?? "(not supplied)"}
+Constraints: ${(input.constraints ?? []).join("; ") || "None"}
+Working branch: ${input.branch ?? "(not specified)"} (base: ${input.baseBranch ?? "main"})`;
 
       const refinement = await generateWithGemini(refinePrompt);
       refinedBrief = (refinement.text ?? "").trim();
@@ -573,9 +606,8 @@ Begin by emitting the initial execution plan described above.`;
           : `${effectiveBasePrompt}
 
 Previous passes (${attempt - 1}) finished without producing shippable artifacts. You are on pass ${attempt} of ${maxAgentPasses}. Treat this run as a critical escalation:
-- Ship a concrete deliverable before exiting (code change, new file, or detailed written assessment).
-- Narrow scope, execute decisively, and validate results via repository evidence.
-- If implementation is unnecessary, capture findings in a written artifact that justifies completion.`;
+- Ship a concrete deliverable before exiting (code change, new file, or detailed written assessment committed to the repo).
+- Narrow scope, execute decisively, and validate results via repository evidence.`;
 
       const { text, finishReason } = await generateWithGemini(prompt);
       latestSummary = (text ?? "").trim();
@@ -628,48 +660,16 @@ Previous passes (${attempt - 1}) finished without producing shippable artifacts.
       }
     }
 
+    // If we reach here, there is still no artifact
     if (!planWasUpdated) {
-      await emitLog(
-        "error",
-        "Agent loop ended without publishing a plan; treating run as a failure."
-      );
+      await emitLog("error", "Agent loop ended without publishing an execution plan.");
+      await updateStatus("failed", "No plan published");
       throw new Error("Agent did not publish an execution plan for review.");
     }
 
-    // Agent completed all passes and updated the plan but produced no diff
-    // This is valid completion (e.g., analysis, planning, or empty repo work)
-    const currentTaskSnapshot = await store.getTask(task.id);
-    const planLines = currentTaskSnapshot?.plan?.map(
-      (step, index) => `${index + 1}. [${step.status}] ${step.title}${step.summary ? ` — ${step.summary}` : ""}`
-    );
-    const planSummary = planLines && planLines.length > 0 ? `Proposed Plan:\n${planLines.join("\n")}` : "";
-    const effectiveSummary =
-      latestSummary || planSummary || fallbackSummaryMessage;
-
-    await emitLog(
-      "info",
-      "Agent completed task successfully. Plan and analysis completed without code changes."
-    );
-    await updateStatus("completed", "Task completed with plan and analysis");
-
-    const completedEvent = {
-      id: randomUUID(),
-      taskId: task.id,
-      type: "task.completed",
-      timestamp: Date.now(),
-      payload: {
-        status: "completed",
-        summary: effectiveSummary,
-        finishReason: "no_changes",
-        workerId
-      }
-    } satisfies TaskEvent;
-
-    await store.appendEvent(task.id, completedEvent);
-    await notifyTaskEvent?.(task.id, completedEvent);
-    await notifyTaskUpdate?.(task.id);
-
-    return { success: true, summary: effectiveSummary } as const;
+    await emitLog("error", "Agent loop ended without producing artifacts (no git diff).");
+    await updateStatus("failed", "No tangible artifacts produced");
+    throw new Error("No tangible output after agent passes.");
   } finally {
     await workspace.cleanup();
   }
