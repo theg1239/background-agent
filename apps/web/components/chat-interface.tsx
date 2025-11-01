@@ -765,7 +765,7 @@ export function ChatInterface({ initialTasks, initialGitHubAuth }: ChatInterface
         <>
           <section className="flex w-full flex-shrink-0 flex-col gap-4 rounded-3xl border border-neutral-900 bg-neutral-950/90 p-4 xl:w-64 xl:border-none xl:bg-transparent xl:p-0">
             <div className="rounded-3xl border border-neutral-800 bg-neutral-950/90 px-4 py-3">
-              <div className="flex items-center justify-between text-xs text-neutral-400">
+              <div className="flex flex-wrap items-center justify-between gap-3 text-xs text-neutral-400">
                 <span
                   className={clsx(
                     "inline-flex items-center gap-2 rounded-full border px-3 py-1 text-xs font-semibold transition",
@@ -778,18 +778,20 @@ export function ChatInterface({ initialTasks, initialGitHubAuth }: ChatInterface
                 <button
                   type="button"
                   onClick={() => setIsCreateOpen(true)}
-                  className="inline-flex items-center justify-center rounded-full border border-neutral-700 bg-white px-3 py-1 text-xs font-semibold text-black transition hover:bg-neutral-200 focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-neutral-400"
+                  className="inline-flex flex-none items-center justify-center rounded-full border border-neutral-700 bg-white px-3 py-1 text-xs font-semibold text-black transition hover:bg-neutral-200 focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-neutral-400"
                 >
                   New task
                 </button>
               </div>
-              <div className="mt-3 flex items-center justify-between text-[11px] uppercase tracking-[0.25em] text-neutral-500">
+              <div className="mt-3 flex flex-wrap items-center justify-between gap-2 text-[11px] uppercase tracking-[0.25em] text-neutral-500">
                 <span>Status</span>
-                <span>{statusSummary}</span>
+                <span className="max-w-[65%] truncate text-right text-neutral-200">
+                  {statusSummary}
+                </span>
               </div>
-              <div className="mt-2 flex items-center justify-between text-xs text-neutral-500">
+              <div className="mt-2 flex flex-wrap items-center justify-between gap-2 text-xs text-neutral-500">
                 <span>GitHub</span>
-                <span>
+                <span className="max-w-[65%] truncate text-right text-neutral-300">
                   {githubAuth.status === "connected" && githubAuth.user
                     ? githubAuth.user.login
                     : "Not linked"}
@@ -825,11 +827,16 @@ export function ChatInterface({ initialTasks, initialGitHubAuth }: ChatInterface
                               : "border-neutral-800 bg-neutral-950 text-neutral-300 hover:border-neutral-600 hover:text-white"
                           )}
                         >
-                          <p className="truncate text-sm font-semibold">{taskItem.title}</p>
-                          <p className="mt-1 text-[10px] uppercase tracking-[0.25em] text-neutral-500">
+                          <p className="truncate text-sm font-semibold leading-snug">{taskItem.title}</p>
+                          {taskItem.description ? (
+                            <p className="mt-1 break-words text-xs text-neutral-500">
+                              {taskItem.description}
+                            </p>
+                          ) : null}
+                          <p className="mt-2 text-[10px] uppercase tracking-[0.25em] text-neutral-500">
                             {humanizeStatus(taskItem.status)}
                           </p>
-                      </button>
+                        </button>
                       );
                     })}
                     {historicalTasks.length > 0 ? (
@@ -845,6 +852,7 @@ export function ChatInterface({ initialTasks, initialGitHubAuth }: ChatInterface
                 ) : (
                   <div className="space-y-3">
                     <p className="text-[11px] uppercase tracking-[0.25em] text-neutral-600">
+                      No active tasks yet
                     </p>
                     <button
                       type="button"
@@ -1247,7 +1255,7 @@ function MultiLineText({ text, className }: { text?: string | null; className?: 
     .filter((paragraph) => paragraph.length > 0);
 
   return (
-    <div className={clsx("space-y-2", className)}>
+    <div className={clsx("space-y-2 break-words", className)}>
       {(paragraphs.length ? paragraphs : [text]).map((paragraph, index) => (
         <p key={`ml-${index}`} className="whitespace-pre-wrap">
           {paragraph}
