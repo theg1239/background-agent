@@ -1,0 +1,23 @@
+# Background Agent Worker
+
+This worker package spawns the autonomous coding agent that executes queued tasks. It prepares a disposable workspace, clones the target repository (if provided), and coordinates the Gemini-powered agent across multiple passes until a tangible artifact exists.
+
+## Execution Flow
+
+- Provision an isolated workspace for the pending task.
+- Clone the requested repository or initialise an empty Git repository when no URL is supplied.
+- Stream plan updates, log entries, file writes, and git diffs back to the task store.
+- Retry the agent up to the configured number of passes when no deliverable is produced.
+- Fall back to a written analysis report when the agent exits without modifying the repository.
+
+## Fallback Analysis Reports
+
+If every agent pass completes without generating a diff, the worker now writes a Markdown report under `.background-agent/`. The report captures the final agent summary or, when none is available, a default message that directs operators to the task logs.
+
+These reports ensure that every task attempt leaves audit trails in git history, helping operators understand why a run failed and what the agent observed.
+
+## Development Notes
+
+- Key settings live in `apps/worker/src/config.ts`.
+- Manual runs can use `pnpm --filter worker start` from the repository root.
+- The worker requires access to Gemini API keys—see `apps/worker/src/gemini.ts` for details.

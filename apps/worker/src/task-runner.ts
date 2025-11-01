@@ -43,6 +43,9 @@ export async function runTaskWithAgent({
   notifyTaskEvent
 }: RunTaskOptions) {
   const workspace = await Workspace.prepare(task.id);
+  const safeTitle = slugify(task.title);
+  const fallbackReportPath = `.background-agent/${task.id}-${safeTitle}-analysis.md`;
+  const fallbackSummaryMessage = `Agent did not produce a usable summary while working on "${task.title}". Review task logs for additional context.`;
 
   const broadcastFileUpdate = async (
     path: string,
@@ -79,6 +82,37 @@ export async function runTaskWithAgent({
     } satisfies TaskEvent;
     await store.appendEvent(task.id, event);
     await notifyTaskEvent?.(task.id, event);
+  };
+
+  const writeFallbackAnalysis = async (rawSummary: string) => {
+    const summary = rawSummary.trim() || fallbackSummaryMessage;
+    const reportContents = `# Task Analysis\n\n${summary}\n`;
+
+    try {
+      let previousContents: string | null = null;
+      try {
+        previousContents = await workspace.readFile(fallbackReportPath);
+      } catch (error) {
+        if ((error as NodeJS.ErrnoException).code && (error as NodeJS.ErrnoException).code !== "ENOENT") {
+          await emitLog(
+            "warning",
+            `Failed to read existing fallback report ${fallbackReportPath}: ${(error as Error).message}`
+          );
+        }
+      }
+
+      const { bytes } = await workspace.writeFile(fallbackReportPath, reportContents);
+      await broadcastFileUpdate(fallbackReportPath, reportContents, previousContents, {
+        byteLength: bytes
+      });
+      return { success: true as const, summary };
+    } catch (error) {
+      await emitLog(
+        "warning",
+        `Failed to write fallback analysis report: ${(error as Error).message}`
+      );
+      return { success: false as const, summary };
+    }
   };
 
   const normalizeSteps = (
@@ -509,7 +543,6 @@ Begin by emitting the initial execution plan described above.`;
 
     let latestSummary = "";
     let fallbackArtifactWritten = false;
-    let fallbackReportPath: string | undefined;
     const maxAgentPasses = Math.max(1, config.agentMaxPasses);
     for (let attempt = 1; attempt <= maxAgentPasses; attempt += 1) {
       if (attempt > 1) {
@@ -538,28 +571,15 @@ Previous passes (${attempt - 1}) finished without producing shippable artifacts.
 
       let diff = await workspace.getDiff();
       if (!diff.trim() && !fallbackArtifactWritten) {
-        const trimmedSummary = latestSummary.trim();
-        if (trimmedSummary) {
-          const safeTitle = slugify(task.title);
-          fallbackReportPath = `.background-agent/${task.id}-${safeTitle}-analysis.md`;
-          const reportContents = `# Task Analysis\n\n${trimmedSummary}\n`;
-          try {
-            const { bytes } = await workspace.writeFile(fallbackReportPath, reportContents);
-            await broadcastFileUpdate(fallbackReportPath, reportContents, null, {
-              byteLength: bytes
-            });
-            fallbackArtifactWritten = true;
-            await emitLog(
-              "info",
-              `Generated fallback analysis report at ${fallbackReportPath} after empty diff.`
-            );
-            diff = await workspace.getDiff();
-          } catch (error) {
-            await emitLog(
-              "warning",
-              `Failed to write fallback analysis report: ${(error as Error).message}`
-            );
-          }
+        const { success, summary } = await writeFallbackAnalysis(latestSummary);
+        latestSummary = summary;
+        if (success) {
+          fallbackArtifactWritten = true;
+          await emitLog(
+            "info",
+            `Generated fallback analysis report at ${fallbackReportPath} after empty diff.`
+          );
+          diff = await workspace.getDiff();
         }
       }
 
@@ -609,16 +629,11 @@ Previous passes (${attempt - 1}) finished without producing shippable artifacts.
       }
     }
 
-    const failureSummary = latestSummary.trim();
-    if (failureSummary && !fallbackArtifactWritten) {
-      const safeTitle = slugify(task.title);
-      fallbackReportPath = `.background-agent/${task.id}-${safeTitle}-analysis.md`;
-      const reportContents = `# Task Analysis\n\n${failureSummary}\n`;
-      try {
-        const { bytes } = await workspace.writeFile(fallbackReportPath, reportContents);
-        await broadcastFileUpdate(fallbackReportPath, reportContents, null, {
-          byteLength: bytes
-        });
+    if (!fallbackArtifactWritten) {
+      const failureSummaryResult = await writeFallbackAnalysis(latestSummary);
+      if (failureSummaryResult.success) {
+        fallbackArtifactWritten = true;
+        latestSummary = failureSummaryResult.summary;
         const diff = await workspace.getDiff();
         if (diff.trim()) {
           const artifactEvent = {
@@ -642,7 +657,7 @@ Previous passes (${attempt - 1}) finished without producing shippable artifacts.
             timestamp: Date.now(),
             payload: {
               status: "completed",
-              summary: failureSummary,
+              summary: latestSummary,
               workerId,
               finishReason: "fallback_report"
             }
@@ -650,13 +665,8 @@ Previous passes (${attempt - 1}) finished without producing shippable artifacts.
           await store.appendEvent(task.id, completedEvent);
           await notifyTaskEvent?.(task.id, completedEvent);
           await notifyTaskUpdate?.(task.id);
-          return { success: true, summary: failureSummary } as const;
+          return { success: true, summary: latestSummary } as const;
         }
-      } catch (error) {
-        await emitLog(
-          "warning",
-          `Fallback report attempt failed: ${(error as Error).message}`
-        );
       }
     }
 
