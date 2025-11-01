@@ -1,6 +1,15 @@
 "use client";
 
-import { FormEvent, useEffect, useMemo, useRef, useState, useCallback, useTransition } from "react";
+import {
+  FormEvent,
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+  useCallback,
+  useTransition,
+  useDeferredValue
+} from "react";
 import { clsx } from "clsx";
 import type { Task, TaskEvent } from "@background-agent/shared";
 import { useTaskEvents } from "../hooks/use-task-events";
@@ -8,7 +17,6 @@ import { CreateTaskForm } from "./create-task-form";
 import { useTaskIndex } from "../hooks/use-task-index";
 import { DiffArtifactCard } from "./diff-artifact-card";
 import { LiveFileDiffViewer, type LiveFileUpdate } from "./live-file-diff-viewer";
-import { MarkdownContent } from "./markdown-content";
 import type { GitHubAuthState } from "../lib/server/github-auth";
 import { createTaskAction, recordFollowUpAction, resolveApprovalAction } from "../app/actions/task-actions";
 
@@ -21,6 +29,9 @@ type PaneView = "chat" | "workspace";
 
 const ACTIVE_TASK_STATUSES: Task["status"][] = ["queued", "planning", "executing", "awaiting_approval"];
 const ACTIVE_TASK_STATUS_SET = new Set<Task["status"]>(ACTIVE_TASK_STATUSES);
+const MAX_EVENT_BUFFER = 600;
+const MAX_DISPLAYED_EVENTS = 320;
+const MAX_LIVE_FILE_EVENTS = 400;
 
 function compareTaskRecency(left: Task, right: Task) {
   return (right.updatedAt ?? right.createdAt) - (left.updatedAt ?? left.createdAt);
@@ -108,7 +119,16 @@ export function ChatInterface({ initialTasks, initialGitHubAuth }: ChatInterface
     }
   }, [tasks, activeTaskId]);
 
-  const { task, events, isConnected } = useTaskEvents(activeTaskId);
+  const { task, events: streamingEvents, isConnected } = useTaskEvents(activeTaskId);
+
+  const limitedEvents = useMemo(() => {
+    if (!streamingEvents || streamingEvents.length <= MAX_EVENT_BUFFER) {
+      return streamingEvents ?? [];
+    }
+    return streamingEvents.slice(streamingEvents.length - MAX_EVENT_BUFFER);
+  }, [streamingEvents]);
+
+  const events = useDeferredValue(limitedEvents);
 
   const liveFileUpdates = useMemo<LiveFileUpdate[]>(() => {
     if (!events.length) return [];
@@ -172,6 +192,10 @@ export function ChatInterface({ initialTasks, initialGitHubAuth }: ChatInterface
       });
     }
 
+    if (updates.length > MAX_LIVE_FILE_EVENTS) {
+      return updates.slice(updates.length - MAX_LIVE_FILE_EVENTS);
+    }
+
     return updates;
   }, [events]);
 
@@ -222,9 +246,15 @@ export function ChatInterface({ initialTasks, initialGitHubAuth }: ChatInterface
       ];
     }
 
-    return events
+    const mapped = events
       .map((event) => formatEvent(event))
       .sort((left, right) => right.timestamp - left.timestamp);
+
+    if (mapped.length > MAX_DISPLAYED_EVENTS) {
+      return mapped.slice(0, MAX_DISPLAYED_EVENTS);
+    }
+
+    return mapped;
   }, [events, resolvedTask]);
 
   const workingSince = useMemo(() => {
@@ -560,8 +590,8 @@ export function ChatInterface({ initialTasks, initialGitHubAuth }: ChatInterface
                   ) : null}
                 </div>
                 {step.summary ? (
-                  <MarkdownContent
-                    content={step.summary}
+                  <MultiLineText
+                    text={step.summary}
                     className="mt-1 text-xs text-neutral-300 [&>p]:m-0"
                   />
                 ) : null}
@@ -667,8 +697,8 @@ export function ChatInterface({ initialTasks, initialGitHubAuth }: ChatInterface
                   <span>{event.label}</span>
                   <span>{new Date(event.timestamp).toLocaleTimeString()}</span>
                 </div>
-                <MarkdownContent
-                  content={event.body}
+                <MultiLineText
+                  text={event.body}
                   className="text-sm leading-relaxed text-inherit [&>p]:m-0 [&>p+*]:mt-2"
                 />
                 {event.planSteps && event.planSteps.length > 0 ? (
@@ -687,8 +717,8 @@ export function ChatInterface({ initialTasks, initialGitHubAuth }: ChatInterface
                           ) : null}
                         </div>
                         {step.summary ? (
-                          <MarkdownContent
-                            content={step.summary}
+                          <MultiLineText
+                            text={step.summary}
                             className="mt-1 text-xs text-neutral-300 [&>p]:m-0"
                           />
                         ) : null}
@@ -697,8 +727,8 @@ export function ChatInterface({ initialTasks, initialGitHubAuth }: ChatInterface
                   </ol>
                 ) : null}
                 {event.detail ? (
-                  <MarkdownContent
-                    content={event.detail}
+                  <MultiLineText
+                    text={event.detail}
                     className="text-xs text-neutral-400 [&>p]:m-0"
                   />
                 ) : null}
@@ -1207,6 +1237,24 @@ function humanizeStatus(status: string) {
     .split("_")
     .map((part) => part.charAt(0).toUpperCase() + part.slice(1))
     .join(" ");
+}
+
+function MultiLineText({ text, className }: { text?: string | null; className?: string }) {
+  if (!text) return null;
+  const paragraphs = text
+    .split(/\n{2,}/)
+    .map((paragraph) => paragraph.trim())
+    .filter((paragraph) => paragraph.length > 0);
+
+  return (
+    <div className={clsx("space-y-2", className)}>
+      {(paragraphs.length ? paragraphs : [text]).map((paragraph, index) => (
+        <p key={`ml-${index}`} className="whitespace-pre-wrap">
+          {paragraph}
+        </p>
+      ))}
+    </div>
+  );
 }
 
 export function formatDuration(ms: number) {
