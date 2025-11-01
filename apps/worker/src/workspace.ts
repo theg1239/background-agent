@@ -6,6 +6,8 @@ import { exec as execCallback, execFile as execFileCallback } from "node:child_p
 const exec = promisify(execCallback);
 const execFile = promisify(execFileCallback);
 
+const toPosixPath = (value: string) => value.replace(/\\/g, "/");
+
 function resolveWorkspaceRoot(taskId: string) {
   const root = process.env.WORKSPACES_DIR ?? path.join(process.cwd(), ".agent-workspaces");
   return path.resolve(root, taskId);
@@ -100,6 +102,182 @@ export class Workspace {
 
     await walk(start);
     return results.slice(0, limit);
+  }
+
+  async searchRipgrep(
+    pattern: string,
+    options?: {
+      path?: string;
+      glob?: string[];
+      regex?: boolean;
+      caseSensitive?: boolean;
+      context?: number;
+      maxMatches?: number;
+    }
+  ) {
+    const resolved = options?.path
+      ? ensureInsideWorkspace(this.root, path.join(this.root, options.path))
+      : this.root;
+    const relativeTarget = path.relative(this.root, resolved) || ".";
+    const args = ["--json", "--line-number", "--no-heading", "--color=never"];
+
+    const maxMatches = Math.min(Math.max(options?.maxMatches ?? 100, 1), 500);
+    // Limit per-file results to help keep responses small.
+    args.push("--max-count", String(Math.max(10, Math.ceil(maxMatches / 2))));
+
+    if (options?.regex !== true) {
+      args.push("--fixed-strings");
+    }
+    if (options?.caseSensitive === true) {
+      args.push("--case-sensitive");
+    } else if (options?.caseSensitive === false) {
+      args.push("--ignore-case");
+    } else {
+      args.push("--smart-case");
+    }
+
+    const contextLines = Math.min(Math.max(options?.context ?? 2, 0), 10);
+    if (contextLines > 0) {
+      args.push(`-C${contextLines}`);
+    }
+
+    const defaultGlobs = [
+      "!.git/*",
+      "!node_modules/*",
+      "!.pnpm/*",
+      "!dist/*",
+      "!build/*",
+      "!tmp/*",
+      "!.turbo/*"
+    ];
+    for (const glob of [...defaultGlobs, ...(options?.glob ?? [])]) {
+      args.push("--glob", glob);
+    }
+
+    args.push("--", pattern, relativeTarget);
+
+    let stdout = "";
+    try {
+      const result = await execFile("rg", args, {
+        cwd: this.root,
+        maxBuffer: 10 * 1024 * 1024
+      });
+      stdout = result.stdout;
+    } catch (error) {
+      const err = error as Error & {
+        code?: number;
+        stdout?: string;
+        stderr?: string;
+        cause?: unknown;
+      };
+      if ((err as NodeJS.ErrnoException).code === "ENOENT") {
+        throw new Error(
+          "ripgrep (rg) is not installed on the worker machine. Install rg to use the riggrep tool."
+        );
+      }
+      if (typeof err.code === "number" && err.code === 1) {
+        stdout = err.stdout ?? "";
+      } else {
+        throw error;
+      }
+    }
+
+    type RipgrepMatchEvent = {
+      type: "match";
+      data: {
+        path?: { text?: string };
+        lines?: { text?: string };
+        line_number?: number;
+        absolute_offset?: number;
+        submatches?: Array<{
+          match?: { text?: string };
+          start?: number;
+          end?: number;
+        }>;
+      };
+    };
+    type RipgrepSummaryEvent = {
+      type: "summary";
+      data?: {
+        elapsed_total?: { millis?: number };
+        stats?: { matches?: number; searches?: number; matcheds?: number };
+      };
+    };
+    type RipgrepUnknownEvent = {
+      type: string;
+      data?: unknown;
+    };
+    type RipgrepEvent = RipgrepMatchEvent | RipgrepSummaryEvent | RipgrepUnknownEvent;
+
+    const isMatchEvent = (event: RipgrepEvent): event is RipgrepMatchEvent =>
+      event.type === "match" && typeof event.data === "object" && event.data !== null;
+    const isSummaryEvent = (event: RipgrepEvent): event is RipgrepSummaryEvent =>
+      event.type === "summary";
+
+    const matches: Array<{
+      path: string;
+      line: number;
+      text: string;
+      submatches: Array<{ text: string; start: number; end: number }>;
+    }> = [];
+
+    let totalMatches = 0;
+    let summary: { elapsedMs?: number; searches?: number; matches?: number } = {};
+
+    for (const line of stdout.split(/\r?\n/)) {
+      if (!line) {
+        continue;
+      }
+      let event: RipgrepEvent;
+      try {
+        event = JSON.parse(line) as RipgrepEvent;
+      } catch {
+        continue;
+      }
+
+      if (isMatchEvent(event)) {
+        totalMatches += 1;
+        if (matches.length >= maxMatches) {
+          continue;
+        }
+
+        const filePath = event.data.path?.text ? toPosixPath(event.data.path.text) : relativeTarget;
+        const lineNumber = event.data.line_number ?? 0;
+        const text = (event.data.lines?.text ?? "").replace(/\r?\n$/, "");
+        const submatches =
+          event.data.submatches?.map((sub) => ({
+            text: sub.match?.text ?? "",
+            start: sub.start ?? 0,
+            end: sub.end ?? 0
+          })) ?? [];
+
+        matches.push({ path: filePath, line: lineNumber, text, submatches });
+      } else if (isSummaryEvent(event)) {
+        const data = event.data ?? {};
+        summary = {
+          elapsedMs: data.elapsed_total?.millis,
+          searches: data.stats?.searches,
+          matches: data.stats?.matches ?? totalMatches
+        };
+      }
+    }
+
+    return {
+      pattern,
+      root: toPosixPath(relativeTarget) || ".",
+      matches,
+      totalMatches,
+      truncated: matches.length < totalMatches,
+      stats: summary
+    };
+  }
+
+  async getStatus() {
+    const { stdout } = await execFile("git", ["status", "--short", "--branch"], {
+      cwd: this.root,
+      maxBuffer: 10 * 1024 * 1024
+    });
+    return stdout;
   }
 
   async runCommand(command: string, options?: { timeoutMs?: number }) {

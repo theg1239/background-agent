@@ -263,6 +263,7 @@ export async function runTaskWithAgent({
 - Always maintain an explicit execution plan.
 - Use the provided tools to update the plan, log progress, change task status, and work with the repository.
 - Decompose work into small, verifiable steps and validate each change.
+- Use riggrep for fast code search and gitStatus to keep the repository state visible.
 - Never fabricate repository results; if you need external context, request human input via logs.
 - Do not mark the task complete until you have produced concrete artifacts (code changes, documentation updates, or a detailed security report) that justify completion.`,
         stopWhen: stepCountIs(config.agentStepLimit),
@@ -369,6 +370,33 @@ export async function runTaskWithAgent({
             return { files };
           }
         }),
+        riggrep: tool({
+          description: "Search for text in the workspace using ripgrep (fast code search).",
+          inputSchema: z.object({
+            pattern: z.string(),
+            path: z.string().default("."),
+            regex: z.boolean().default(false),
+            caseSensitive: z.boolean().optional(),
+            glob: z.array(z.string()).optional(),
+            context: z.number().min(0).max(10).default(2),
+            maxMatches: z.number().min(1).max(200).default(100)
+          }),
+          execute: async ({ pattern, path, regex, caseSensitive, glob, context, maxMatches }) => {
+            const result = await workspace.searchRipgrep(pattern, {
+              path,
+              regex,
+              caseSensitive,
+              glob,
+              context,
+              maxMatches
+            });
+            await emitLog(
+              "info",
+              `riggrep located ${result.matches.length} of ${result.totalMatches} matches for "${pattern}".`
+            );
+            return result;
+          }
+        }),
         runCommand: tool({
           description: "Run a shell command inside the workspace",
           inputSchema: z.object({
@@ -387,6 +415,21 @@ export async function runTaskWithAgent({
           execute: async () => {
             const diff = await workspace.getDiff();
             return { diff };
+          }
+        }),
+        gitStatus: tool({
+          description: "Show the current git status (branch, staged, unstaged, untracked files).",
+          inputSchema: z.object({}),
+          execute: async () => {
+            try {
+              const status = await workspace.getStatus();
+              return { status };
+            } catch (error) {
+              const message =
+                (error as Error).message ?? "Failed to read git status for the workspace.";
+              await emitLog("warning", `gitStatus tool failed: ${message}`);
+              return { status: "", error: message };
+            }
           }
         })
       }
@@ -413,7 +456,7 @@ Process Expectations
 - Update the plan after each meaningful action so step statuses remain accurate.
 - Log progress for notable milestones, insights, or decisions (minimum once per major phase).
 - Use setStatus when transitioning between planning, executing, and completion states.
-- Exercise repository tools (readFile/writeFile/listFiles/runCommand/gitDiff) to gather evidence and modify files.
+- Exercise repository tools (readFile/writeFile/listFiles/runCommand/riggrep/gitDiff/gitStatus) to gather evidence and modify files efficiently.
 
 Quality Bar & Validation
 - Run relevant tests or checks when practical; if impractical, explain why and describe alternate validation.

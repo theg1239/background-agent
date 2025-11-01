@@ -6,7 +6,7 @@ const QUEUE_KEY = "tasks:queue";
 const PENDING_SET_KEY = "tasks:queue:pending";
 const LEASE_HASH_KEY = "tasks:leases";
 const LEASE_ZSET_KEY = "tasks:lease_expirations";
-const LEASE_MS = 60_000;
+export const DEFAULT_LEASE_MS = 60_000;
 
 export interface TaskClaim {
   task: Task;
@@ -52,7 +52,7 @@ export class TaskQueue {
         continue;
       }
 
-      await this.redis.zadd(LEASE_ZSET_KEY, now + LEASE_MS, taskId);
+      await this.redis.zadd(LEASE_ZSET_KEY, now + DEFAULT_LEASE_MS, taskId);
 
       const record = await this.store.getTaskForWorker(taskId);
       if (!record) {
@@ -76,6 +76,47 @@ export class TaskQueue {
     await this.redis.hdel(LEASE_HASH_KEY, taskId);
     await this.redis.zrem(LEASE_ZSET_KEY, taskId);
     await this.enqueue(taskId);
+  }
+
+  async extendLease(
+    taskId: string,
+    workerId: string,
+    options?: { ttlMs?: number }
+  ): Promise<boolean> {
+    const leaseDataRaw = await this.redis.hget(LEASE_HASH_KEY, taskId);
+    if (!leaseDataRaw) {
+      return false;
+    }
+
+    let leaseData: {
+      workerId?: string;
+      leasedAt?: number;
+      renewals?: number;
+      renewedAt?: number;
+    };
+    try {
+      leaseData = JSON.parse(leaseDataRaw);
+    } catch {
+      leaseData = {};
+    }
+
+    if (leaseData.workerId && leaseData.workerId !== workerId) {
+      return false;
+    }
+
+    const now = Date.now();
+    const ttl = Math.max(
+      15_000,
+      Math.min(options?.ttlMs ?? DEFAULT_LEASE_MS, DEFAULT_LEASE_MS * 5)
+    );
+
+    leaseData.workerId = workerId;
+    leaseData.renewals = (leaseData.renewals ?? 0) + 1;
+    leaseData.renewedAt = now;
+
+    await this.redis.hset(LEASE_HASH_KEY, taskId, JSON.stringify(leaseData));
+    await this.redis.zadd(LEASE_ZSET_KEY, now + ttl, taskId);
+    return true;
   }
 
   async requeueLeases() {

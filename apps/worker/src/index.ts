@@ -2,7 +2,7 @@ import { createServer } from "node:http";
 import { randomUUID } from "node:crypto";
 import { setTimeout as sleep } from "node:timers/promises";
 import Redis from "ioredis";
-import { TaskQueue, TaskStore } from "@background-agent/shared";
+import { TaskQueue, TaskStore, DEFAULT_LEASE_MS } from "@background-agent/shared";
 import type { TaskEvent } from "@background-agent/shared";
 import { Server as SocketIOServer } from "socket.io";
 import { config } from "./config";
@@ -33,6 +33,47 @@ const broadcaster = new SocketTaskBroadcaster(io);
 const store = new TaskStore(redis);
 const queue = new TaskQueue(redis, store);
 
+const LEASE_RENEW_INTERVAL_MS = Math.max(15_000, Math.floor(DEFAULT_LEASE_MS / 2));
+
+const startLeaseKeepAlive = (taskId: string) => {
+  let stopped = false;
+
+  const renew = async () => {
+    if (stopped) return;
+    try {
+      const extended = await queue.extendLease(taskId, workerId, {
+        ttlMs: DEFAULT_LEASE_MS
+      });
+      if (!extended && !stopped) {
+        console.warn(
+          `Worker ${workerId} failed to extend lease for task ${taskId}; task may be requeued.`
+        );
+      }
+    } catch (error) {
+      if (!stopped) {
+        console.error(
+          `Worker ${workerId} encountered an error extending lease for task ${taskId}.`,
+          error
+        );
+      }
+    }
+  };
+
+  const timer = setInterval(() => {
+    void renew();
+  }, LEASE_RENEW_INTERVAL_MS);
+  if (typeof timer.unref === "function") {
+    timer.unref();
+  }
+
+  void renew();
+
+  return () => {
+    stopped = true;
+    clearInterval(timer);
+  };
+};
+
 httpServer.listen(config.socketPort, config.socketHost, () => {
   console.log(
     `Socket server listening on ${config.socketHost}:${config.socketPort} (worker ${workerId})`
@@ -62,6 +103,7 @@ async function processLoop() {
       }
 
       const { task, input } = claim;
+      const stopLeaseKeepAlive = startLeaseKeepAlive(task.id);
 
       await store.updateStatus(task.id, "planning", { workerId });
       await emitTaskUpdate(task.id);
@@ -96,6 +138,8 @@ async function processLoop() {
         await store.appendEvent(task.id, failureEvent);
         await emitTaskEvent(task.id, failureEvent);
         await queue.ack(task.id);
+      } finally {
+        stopLeaseKeepAlive();
       }
     } catch (outerError) {
       console.error("Worker loop error", outerError);
