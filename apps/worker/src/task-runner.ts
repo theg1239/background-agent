@@ -201,6 +201,16 @@ export async function runTaskWithAgent({
       await emitInitialWorkspaceSnapshot();
     } else {
       await emitLog("info", "No repository URL provided; starting with empty workspace");
+      try {
+        await workspace.git(["init"]);
+        await workspace.git(["checkout", "-B", input.baseBranch ?? "main"]);
+        await emitLog("info", "Initialized empty git repository for workspace");
+      } catch (error) {
+        await emitLog(
+          "warning",
+          `Failed to initialize git repository in workspace: ${(error as Error).message}`
+        );
+      }
     }
 
     const buildAgent = (languageModel: LanguageModel) =>
@@ -377,6 +387,35 @@ Deliverables
 
 Begin by emitting the initial execution plan described above.`;
 
+    const coerceText = async (result: any): Promise<string> => {
+      try {
+        if (!result) return "";
+        if (typeof result.text === "string") return result.text;
+        const response = (result as any).response;
+        const maybeTextFn = response?.text ?? (result as any).text;
+        if (typeof maybeTextFn === "function") {
+          const out = await maybeTextFn.call(response ?? result);
+          if (typeof out === "string") return out;
+        }
+        const messages = response?.messages ?? (result as any).messages;
+        if (Array.isArray(messages) && messages.length > 0) {
+          let last: any | undefined;
+          for (let i = messages.length - 1; i >= 0; i -= 1) {
+            const m = messages[i];
+            if (m && (m as any).role === "assistant") {
+              last = m;
+              break;
+            }
+          }
+          if (!last) last = messages[messages.length - 1];
+          const content = (last as any)?.content;
+          if (typeof content === "string") return content;
+        }
+      } catch {
+      }
+      return "";
+    };
+
     const generateWithGemini = async (prompt: string) => {
       let attempts = 0;
       let totalWaitMs = 0;
@@ -414,8 +453,10 @@ Begin by emitting the initial execution plan described above.`;
         const agent = buildAgent(handle.model as unknown as LanguageModel);
         try {
           const result = await agent.generate({ prompt });
+          // Ensure a plain string `text` property exists when possible
+          const normalizedText = await coerceText(result);
           reportGeminiSuccess(handle);
-          return result;
+          return { ...result, text: normalizedText };
         } catch (error) {
           lastError = error;
           const outcome = reportGeminiFailure(handle, error);
