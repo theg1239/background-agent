@@ -1,10 +1,10 @@
-import { createGoogleGenerativeAI } from "@ai-sdk/google";
+import { createOpenRouter } from "@openrouter/ai-sdk-provider";
 import { config } from "./config";
 
 const MIN_BACKOFF_MS = 5_000;
 const DEFAULT_RATE_LIMIT_BACKOFF_MS = 30_000;
 
-type GeminiClientFactory = ReturnType<typeof createGoogleGenerativeAI>;
+type OpenRouterClientFactory = ReturnType<typeof createOpenRouter>;
 
 interface KeyState {
   key: string;
@@ -14,16 +14,16 @@ interface KeyState {
   consecutiveFailures: number;
 }
 
-export class GeminiKeysUnavailableError extends Error {
+export class OpenRouterKeysUnavailableError extends Error {
   constructor(public readonly retryAfterMs: number) {
     super(
       retryAfterMs > 0
-        ? `All Gemini API keys are temporarily rate limited. Next retry in ${Math.ceil(
+        ? `All OpenRouter API keys are temporarily rate limited. Next retry in ${Math.ceil(
             retryAfterMs / 1000
           )}s.`
-        : "All Gemini API keys are unavailable."
+        : "All OpenRouter API keys are unavailable."
     );
-    this.name = "GeminiKeysUnavailableError";
+    this.name = "OpenRouterKeysUnavailableError";
   }
 }
 
@@ -32,17 +32,17 @@ function maskKey(key: string) {
   return suffix ? `***${suffix}` : "***";
 }
 
-class GeminiKeyManager {
+class OpenRouterKeyManager {
   private readonly keys: KeyState[];
   private cursor = 0;
 
   constructor(keys: string[]) {
     if (keys.length === 0) {
-      throw new Error("At least one Gemini API key is required.");
+      throw new Error("At least one OpenRouter API key is required.");
     }
     this.keys = keys.map((key, index) => ({
       key,
-      label: `key-${index + 1}`,
+      label: `openrouter-${index + 1}`,
       mask: maskKey(key),
       nextAvailableAt: 0,
       consecutiveFailures: 0
@@ -62,7 +62,7 @@ class GeminiKeyManager {
 
     const soonest = Math.min(...this.keys.map((state) => state.nextAvailableAt));
     const waitMs = Math.max(soonest - now, MIN_BACKOFF_MS);
-    throw new GeminiKeysUnavailableError(waitMs);
+    throw new OpenRouterKeysUnavailableError(waitMs);
   }
 
   markSuccess(index: number) {
@@ -87,27 +87,21 @@ class GeminiKeyManager {
     const backoff = Math.min(MIN_BACKOFF_MS * state.consecutiveFailures, 60_000);
     state.nextAvailableAt = Date.now() + backoff;
   }
-
-  nextAvailability(): number | null {
-    const soonest = Math.min(...this.keys.map((state) => state.nextAvailableAt));
-    const delta = soonest - Date.now();
-    return delta > 0 ? delta : null;
-  }
 }
 
-let keyManager: GeminiKeyManager | null = null;
+let keyManager: OpenRouterKeyManager | null = null;
 
-function getKeyManager(): GeminiKeyManager {
+function getKeyManager(): OpenRouterKeyManager {
   if (!keyManager) {
-    if (config.geminiApiKeys.length === 0) {
-      throw new Error("Gemini provider requested but no API keys are configured.");
+    if (config.openrouterApiKeys.length === 0) {
+      throw new Error("OpenRouter provider requested but no API keys are configured.");
     }
-    keyManager = new GeminiKeyManager(config.geminiApiKeys);
+    keyManager = new OpenRouterKeyManager(config.openrouterApiKeys);
   }
   return keyManager;
 }
 
-export interface GeminiModelHandle {
+export interface OpenRouterModelHandle {
   model: unknown;
   index: number;
   label: string;
@@ -150,11 +144,12 @@ function parseRetryAfterMs(error: unknown): { retryAfterMs?: number; message: st
   };
 }
 
-export function acquireGeminiModel(modelName: string): GeminiModelHandle {
+export function acquireOpenRouterModel(modelName: string): OpenRouterModelHandle {
   const manager = getKeyManager();
   const { state, index } = manager.acquire();
-  const client: GeminiClientFactory = createGoogleGenerativeAI({
-    apiKey: state.key
+  const client: OpenRouterClientFactory = createOpenRouter({
+    apiKey: state.key,
+    baseURL: config.openrouterBaseUrl
   });
   const model = client(modelName);
   return {
@@ -165,11 +160,11 @@ export function acquireGeminiModel(modelName: string): GeminiModelHandle {
   };
 }
 
-export function reportGeminiSuccess(handle: GeminiModelHandle) {
+export function reportOpenRouterSuccess(handle: OpenRouterModelHandle) {
   getKeyManager().markSuccess(handle.index);
 }
 
-export function reportGeminiFailure(handle: GeminiModelHandle, error: unknown) {
+export function reportOpenRouterFailure(handle: OpenRouterModelHandle, error: unknown) {
   const parsed = parseRetryAfterMs(error);
   if (parsed) {
     getKeyManager().markRateLimited(handle.index, parsed.retryAfterMs);
@@ -187,8 +182,4 @@ export function reportGeminiFailure(handle: GeminiModelHandle, error: unknown) {
     reason: "fatal" as const,
     message: error instanceof Error ? error.message : "Unknown error"
   };
-}
-
-export function nextGeminiAvailabilityMs(): number | null {
-  return keyManager ? keyManager.nextAvailability() : null;
 }

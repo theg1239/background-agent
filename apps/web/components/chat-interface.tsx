@@ -8,6 +8,7 @@ import { CreateTaskForm } from "./create-task-form";
 import { useTaskIndex } from "../hooks/use-task-index";
 import { DiffArtifactCard } from "./diff-artifact-card";
 import { LiveFileDiffViewer, type LiveFileUpdate } from "./live-file-diff-viewer";
+import { MarkdownContent } from "./markdown-content";
 import type { GitHubAuthState } from "../lib/server/github-auth";
 import { createTaskAction, recordFollowUpAction, resolveApprovalAction } from "../app/actions/task-actions";
 
@@ -654,11 +655,40 @@ export function ChatInterface({ initialTasks, initialGitHubAuth }: ChatInterface
                   <span>{event.label}</span>
                   <span>{new Date(event.timestamp).toLocaleTimeString()}</span>
                 </div>
-                <p className="text-sm leading-relaxed">{event.body}</p>
+                <MarkdownContent
+                  content={event.body}
+                  className="text-sm leading-relaxed text-inherit [&>p]:m-0 [&>p+*]:mt-2"
+                />
+                {event.planSteps && event.planSteps.length > 0 ? (
+                  <ol className="mt-2 space-y-2 text-sm text-neutral-100">
+                    {event.planSteps.map((step) => (
+                      <li
+                        key={step.id}
+                        className="rounded-xl border border-emerald-400/20 bg-black/30 px-3 py-2"
+                      >
+                        <div className="flex flex-wrap items-start justify-between gap-3">
+                          <span className="font-medium text-white">{step.title}</span>
+                          {step.status ? (
+                            <span className="text-[10px] uppercase tracking-[0.25em] text-neutral-400">
+                              {humanizeStatus(step.status)}
+                            </span>
+                          ) : null}
+                        </div>
+                        {step.summary ? (
+                          <MarkdownContent
+                            content={step.summary}
+                            className="mt-1 text-xs text-neutral-300 [&>p]:m-0"
+                          />
+                        ) : null}
+                      </li>
+                    ))}
+                  </ol>
+                ) : null}
                 {event.detail ? (
-                  <pre className="scrollbar max-h-48 overflow-y-auto whitespace-pre-wrap rounded-xl bg-neutral-950/90 p-4 text-xs text-neutral-400">
-                    {event.detail}
-                  </pre>
+                  <MarkdownContent
+                    content={event.detail}
+                    className="text-xs text-neutral-400 [&>p]:m-0"
+                  />
                 ) : null}
                 {event.artifactType === "git_diff" && event.diff && resolvedTask ? (
                   <DiffArtifactCard
@@ -905,16 +935,46 @@ export function ChatInterface({ initialTasks, initialGitHubAuth }: ChatInterface
                 onReviewDiff={latestDiffEvent ? () => openConversation(latestDiffEvent.event.id) : undefined}
               />
             </div>
-            <div className="flex min-h-0 flex-1 overflow-hidden xl:hidden">
-              {mobilePane === "workspace" ? (
-                <LiveFileDiffViewer
-                  updates={liveFileUpdates}
-                  className="flex-1"
-                  onReviewDiff={latestDiffEvent ? () => openConversation(latestDiffEvent.event.id) : undefined}
-                />
-              ) : (
-                <ConversationPanel highlightEventId={focusedEventId} />
-              )}
+            <div className="flex min-h-0 flex-1 flex-col gap-3 overflow-hidden xl:hidden">
+              <div className="flex items-center gap-2 rounded-full border border-neutral-800 bg-neutral-950/90 p-1 text-xs text-neutral-300">
+                <button
+                  type="button"
+                  onClick={() => setMobilePane("chat")}
+                  aria-pressed={mobilePane === "chat"}
+                  className={clsx(
+                    "flex-1 rounded-full px-3 py-2 font-semibold transition focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-emerald-400",
+                    mobilePane === "chat"
+                      ? "bg-emerald-500/20 text-emerald-100 shadow-inner"
+                      : "text-neutral-400 hover:text-white"
+                  )}
+                >
+                  Live log
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setMobilePane("workspace")}
+                  aria-pressed={mobilePane === "workspace"}
+                  className={clsx(
+                    "flex-1 rounded-full px-3 py-2 font-semibold transition focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-emerald-400",
+                    mobilePane === "workspace"
+                      ? "bg-emerald-500/20 text-emerald-100 shadow-inner"
+                      : "text-neutral-400 hover:text-white"
+                  )}
+                >
+                  Workspace diff
+                </button>
+              </div>
+              <div className="flex min-h-0 flex-1 overflow-hidden">
+                {mobilePane === "workspace" ? (
+                  <LiveFileDiffViewer
+                    updates={liveFileUpdates}
+                    className="flex-1"
+                    onReviewDiff={latestDiffEvent ? () => openConversation(latestDiffEvent.event.id) : undefined}
+                  />
+                ) : (
+                  <ConversationPanel highlightEventId={focusedEventId} />
+                )}
+              </div>
             </div>
           </div>
         </>
@@ -1119,6 +1179,7 @@ type DisplayEvent = {
   label: string;
   body: string;
   detail?: string;
+  planSteps?: Array<{ id: string; title: string; status?: string; summary?: string }>;
   artifactType?: string;
   diff?: string;
   eventId?: string;
@@ -1166,20 +1227,50 @@ function formatEvent(event: TaskEvent): DisplayEvent {
       };
     }
     case "task.updated": {
-      const status = event.payload?.status ?? "updated";
+      const statusRaw =
+        typeof event.payload?.status === "string" && event.payload.status.trim()
+          ? event.payload.status.trim()
+          : "updated";
+      const status = humanizeStatus(statusRaw);
+      const reason =
+        typeof event.payload?.reason === "string" && event.payload.reason.trim()
+          ? event.payload.reason.trim()
+          : undefined;
       return {
         ...base,
         label: "Status update",
         body: `Task is now ${status}.`,
+        detail: reason,
         tone: "system"
       };
     }
     case "plan.updated": {
+      const rawSteps = Array.isArray(event.payload?.plan) ? event.payload.plan : [];
+      const planSteps = rawSteps.map((step: any, index: number) => {
+        const id =
+          typeof step?.id === "string" && step.id.trim().length
+            ? step.id
+            : `${event.id}-plan-${index + 1}`;
+        const title =
+          typeof step?.title === "string" && step.title.trim().length
+            ? step.title.trim()
+            : `Step ${index + 1}`;
+        const status =
+          typeof step?.status === "string" && step.status.trim().length ? step.status.trim() : undefined;
+        const summary =
+          typeof step?.summary === "string" && step.summary.trim().length ? step.summary.trim() : undefined;
+        return { id, title, status, summary };
+      });
+      const note =
+        typeof event.payload?.note === "string" && event.payload.note.trim().length
+          ? event.payload.note.trim()
+          : undefined;
       return {
         ...base,
         label: "Plan updated",
-        body: "Execution plan refreshed.",
-        detail: JSON.stringify(event.payload?.plan, null, 2),
+        body: planSteps.length ? "Execution plan refreshed." : "Plan cleared.",
+        detail: note,
+        planSteps,
         tone: "system"
       };
     }

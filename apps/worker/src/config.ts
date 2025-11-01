@@ -1,20 +1,18 @@
 import "dotenv/config";
 
-function requiredList(name: string, raw: string | undefined): string[] {
-  if (!raw) {
-    throw new Error(`Missing required environment variable: ${name}`);
-  }
+function parseList(raw: string | undefined): string[] {
+  if (!raw) return [];
 
-  const values = raw
+  return raw
     .split(/[, \n\r\t]+/)
     .map((value) => value.trim())
     .filter((value) => value.length > 0);
+}
 
+function requireNonEmpty(name: string, values: string[]) {
   if (values.length === 0) {
     throw new Error(`Environment variable ${name} must include at least one API key.`);
   }
-
-  return values;
 }
 
 function positiveInteger(name: string, fallback: number): number {
@@ -41,10 +39,24 @@ export const config = {
   redisUrl: resolveRedisUrl(),
   pollIntervalMs: Number(process.env.QUEUE_POLL_INTERVAL_MS ?? "1000"),
   maxConcurrentTasks: Number(process.env.WORKER_MAX_CONCURRENCY ?? "2"),
-  geminiApiKeys: requiredList(
-    "GOOGLE_GENERATIVE_AI_API_KEYS or GOOGLE_GENERATIVE_AI_API_KEY",
+  aiProvider: (() => {
+    const raw = (process.env.AI_PROVIDER ?? "gemini").trim().toLowerCase();
+    if (raw === "gemini" || raw === "openrouter") {
+      return raw;
+    }
+    throw new Error(
+      `Unsupported AI_PROVIDER "${process.env.AI_PROVIDER}". Expected "gemini" or "openrouter".`
+    );
+  })(),
+  geminiApiKeys: parseList(
     process.env.GOOGLE_GENERATIVE_AI_API_KEYS ?? process.env.GOOGLE_GENERATIVE_AI_API_KEY
   ),
+  geminiModelName: (process.env.GEMINI_MODEL_NAME ?? "gemini-2.5-pro").trim(),
+  openrouterApiKeys: parseList(
+    process.env.OPENROUTER_API_KEYS ?? process.env.OPENROUTER_API_KEY
+  ),
+  openrouterModelName: (process.env.OPENROUTER_MODEL_ID ?? "anthropic/claude-4.5-sonnet").trim(),
+  openrouterBaseUrl: (process.env.OPENROUTER_BASE_URL ?? "https://openrouter.ai/api/v1").trim(),
   socketPort: Number(process.env.WORKER_SOCKET_PORT ?? "4000"),
   socketHost: process.env.WORKER_SOCKET_HOST ?? "0.0.0.0",
   socketCorsOrigin: (() => {
@@ -60,3 +72,12 @@ export const config = {
   agentMaxPasses: positiveInteger("AGENT_MAX_PASSES", 3),
   agentStepLimit: positiveInteger("AGENT_STEP_LIMIT", 60)
 };
+
+if (config.aiProvider === "gemini") {
+  requireNonEmpty(
+    "GOOGLE_GENERATIVE_AI_API_KEYS or GOOGLE_GENERATIVE_AI_API_KEY",
+    config.geminiApiKeys
+  );
+} else if (config.aiProvider === "openrouter") {
+  requireNonEmpty("OPENROUTER_API_KEYS or OPENROUTER_API_KEY", config.openrouterApiKeys);
+}

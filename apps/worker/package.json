@@ -9,12 +9,13 @@
     "build": "tsup src/index.ts --format esm --dts --splitting false --target node20"
   },
   "dependencies": {
-    "@background-agent/shared": "workspace:*",
     "@ai-sdk/google": "2.0.26",
+    "@background-agent/shared": "workspace:*",
+    "@openrouter/ai-sdk-provider": "^1.2.0",
     "ai": "6.0.0-beta.90",
+    "dotenv": "^16.4.5",
     "ioredis": "^5.4.1",
     "socket.io": "^4.7.5",
-    "dotenv": "^16.4.5",
     "zod": "^3.25.76"
   },
   "devDependencies": {

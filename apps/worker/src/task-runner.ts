@@ -1,6 +1,6 @@
 import { randomUUID } from "node:crypto";
 import { ToolLoopAgent, stepCountIs, tool } from "ai";
-import type { LanguageModel } from "ai";
+import type { LanguageModel, StepResult } from "ai";
 import { z } from "zod";
 import type { CreateTaskInput, Task, TaskEvent, TaskPlanStep } from "@background-agent/shared";
 import { TaskStatusSchema, TaskStore } from "@background-agent/shared";
@@ -11,6 +11,14 @@ import {
   reportGeminiFailure,
   reportGeminiSuccess
 } from "./gemini";
+import {
+  acquireOpenRouterModel,
+  OpenRouterKeysUnavailableError,
+  reportOpenRouterFailure,
+  reportOpenRouterSuccess
+} from "./openrouter";
+import type { GeminiModelHandle } from "./gemini";
+import type { OpenRouterModelHandle } from "./openrouter";
 import { Workspace } from "./workspace";
 
 interface RunTaskOptions {
@@ -22,10 +30,36 @@ interface RunTaskOptions {
   notifyTaskEvent?: (taskId: string, event: TaskEvent) => Promise<void>;
 }
 
-const MODEL_NAME = "gemini-2.5-flash";
-const MAX_GEMINI_ATTEMPTS = Math.max(config.geminiApiKeys.length * 5, 5);
-const MAX_GEMINI_WAIT_MS = 5 * 60_000;
+const providerKind = (config.aiProvider === "openrouter" ? "openrouter" : "gemini") as
+  | "gemini"
+  | "openrouter";
+const MODEL_NAME =
+  providerKind === "gemini" ? config.geminiModelName : config.openrouterModelName;
+const providerLabel = providerKind === "gemini" ? "Gemini" : "OpenRouter";
+const providerKeys =
+  providerKind === "gemini" ? config.geminiApiKeys : config.openrouterApiKeys;
+const MAX_MODEL_ATTEMPTS = Math.max(providerKeys.length * 5, 5);
+const MAX_MODEL_WAIT_MS = 5 * 60_000;
 const delay = (ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms));
+type ProviderHandle = GeminiModelHandle | OpenRouterModelHandle;
+
+const acquireModel = (): ProviderHandle =>
+  providerKind === "gemini"
+    ? (acquireGeminiModel(MODEL_NAME) as ProviderHandle)
+    : (acquireOpenRouterModel(MODEL_NAME) as ProviderHandle);
+
+const reportProviderSuccess = (handle: ProviderHandle) => {
+  if (providerKind === "gemini") {
+    reportGeminiSuccess(handle as GeminiModelHandle);
+  } else {
+    reportOpenRouterSuccess(handle as OpenRouterModelHandle);
+  }
+};
+
+const reportProviderFailure = (handle: ProviderHandle, error: unknown) =>
+  providerKind === "gemini"
+    ? reportGeminiFailure(handle as GeminiModelHandle, error)
+    : reportOpenRouterFailure(handle as OpenRouterModelHandle, error);
 
 const slugify = (value: string) =>
   value
@@ -70,6 +104,12 @@ export async function runTaskWithAgent({
   };
 
   const emitLog = async (level: "info" | "warning" | "error", message: string) => {
+    const timestamp = new Date().toISOString();
+    const prefix = `[${timestamp}] [worker:${workerId}] [task:${task.id}]`;
+    const consoleMethod =
+      level === "error" ? console.error : level === "warning" ? console.warn : console.log;
+    consoleMethod(`${prefix} ${message}`);
+
     const event = {
       id: randomUUID(),
       taskId: task.id,
@@ -216,6 +256,29 @@ export async function runTaskWithAgent({
     }
 
     let planWasUpdated = false;
+    let agentStepCounter = 0;
+
+    const formatPreview = (value: string, maxLength = 240) => {
+      if (!value) return "";
+      const normalized = value.replace(/\s+/g, " ").trim();
+      if (!normalized) return "";
+      if (normalized.length <= maxLength) return normalized;
+      return `${normalized.slice(0, Math.max(0, maxLength - 1))}…`;
+    };
+
+    const joinToolNames = (items: Array<{ toolName?: string }>) => {
+      if (!Array.isArray(items) || items.length === 0) {
+        return "none";
+      }
+      const names = items
+        .map((item) => item?.toolName ?? "")
+        .map((name) => name.trim())
+        .filter((name) => name.length > 0);
+      if (names.length === 0) {
+        return "unknown";
+      }
+      return formatPreview(names.join(", "), 160);
+    };
 
     // --- Tool definitions (unchanged behavior) ---
     const toolsAll = {
@@ -236,6 +299,10 @@ export async function runTaskWithAgent({
           );
 
           planWasUpdated = true;
+          const planSummary = normalized
+            .map((step, index) => `${index + 1}. ${step.title} [${step.status}]`)
+            .join(" | ");
+          await emitLog("info", `Execution plan updated (${normalized.length} steps): ${formatPreview(planSummary, 300)}`);
           const event = {
             id: randomUUID(),
             taskId: task.id,
@@ -391,6 +458,38 @@ export async function runTaskWithAgent({
       setStatus: toolsAll.setStatus
     } as const;
 
+    const logAgentStep = async (stepResult: StepResult<typeof toolsAll>) => {
+      const stepIndex = agentStepCounter + 1;
+      agentStepCounter = stepIndex;
+
+      const usage = stepResult.usage ?? ({} as Record<string, number>);
+      const promptTokens = (usage as Record<string, number>).promptTokens ?? 0;
+      const completionTokens = (usage as Record<string, number>).completionTokens ?? 0;
+      const totalTokens =
+        (usage as Record<string, number>).totalTokens ??
+        promptTokens + completionTokens;
+
+      const toolCallSummary = joinToolNames(stepResult.toolCalls as Array<{ toolName?: string }>);
+      const toolResultSummary = joinToolNames(
+        stepResult.toolResults as Array<{ toolName?: string }>
+      );
+      const textPreview = formatPreview(stepResult.text ?? "", 220);
+      const reasoningPreview = formatPreview(stepResult.reasoningText ?? "", 160);
+      const warningCount = stepResult.warnings?.length ?? 0;
+
+      let message = `Agent step ${stepIndex} finished (reason=${stepResult.finishReason}; toolCalls=${toolCallSummary}; toolResults=${toolResultSummary}; tokens prompt=${promptTokens}, completion=${completionTokens}, total=${totalTokens})`;
+      if (warningCount > 0) {
+        message += `; warnings=${warningCount}`;
+      }
+      if (reasoningPreview) {
+        message += `; reasoning="${reasoningPreview}"`;
+      }
+      if (textPreview) {
+        message += `; text="${textPreview}"`;
+      }
+      await emitLog("info", message);
+    };
+
     const buildAgent = (languageModel: LanguageModel) =>
       new ToolLoopAgent({
         model: languageModel,
@@ -401,6 +500,21 @@ export async function runTaskWithAgent({
 - Use repo tools (readFile/writeFile/listFiles/riggrep/gitStatus/gitDiff/runCommand) to gather evidence and modify files.
 - Do not mark completion unless you produced concrete artifacts (code diffs, files) to justify closure.`,
         tools: toolsAll,
+        onStepFinish: async (stepResult) => {
+          await logAgentStep(stepResult);
+        },
+        onFinish: async (event) => {
+          const usage = (event.totalUsage ?? {}) as Record<string, number>;
+          const promptTokens = usage.promptTokens ?? 0;
+          const completionTokens = usage.completionTokens ?? 0;
+          const totalTokens =
+            usage.totalTokens ?? promptTokens + completionTokens;
+          const summaryPreview = formatPreview(event.text ?? "", 240) || "(empty)";
+          await emitLog(
+            "info",
+            `Agent run completed after ${event.steps.length} step(s) (reason=${event.finishReason}; tokens prompt=${promptTokens}, completion=${completionTokens}, total=${totalTokens}). Final text="${summaryPreview}"`
+          );
+        },
         // Hard ceiling; loop stops if this limit is hit.
         stopWhen: stepCountIs(config.agentStepLimit),
         // Force a plan on step 0; then allow normal execution.
@@ -482,67 +596,114 @@ Begin by emitting the initial execution plan described above.`;
       return "";
     };
 
-    const generateWithGemini = async (prompt: string) => {
+    const generateWithProvider = async (prompt: string) => {
       let attempts = 0;
       let totalWaitMs = 0;
       let lastError: unknown;
 
-      while (attempts < MAX_GEMINI_ATTEMPTS) {
-        let handle;
+      while (attempts < MAX_MODEL_ATTEMPTS) {
+        const attemptNumber = attempts + 1;
+        await emitLog(
+          "info",
+          `${providerLabel} generation attempt ${attemptNumber} of ${MAX_MODEL_ATTEMPTS} (cumulative wait ${Math.round(
+            totalWaitMs / 1000
+          )}s; promptLength=${prompt.length} chars).`
+        );
+
+        let handle: ProviderHandle;
         try {
-          handle = acquireGeminiModel(MODEL_NAME);
+          handle = acquireModel();
         } catch (error) {
-          if (error instanceof GeminiKeysUnavailableError) {
-            if (totalWaitMs >= MAX_GEMINI_WAIT_MS) {
+          const isProviderRateLimited =
+            (providerKind === "gemini" && error instanceof GeminiKeysUnavailableError) ||
+            (providerKind === "openrouter" &&
+              error instanceof OpenRouterKeysUnavailableError);
+
+          if (isProviderRateLimited) {
+            const retryAfterMs =
+              error instanceof GeminiKeysUnavailableError ||
+              error instanceof OpenRouterKeysUnavailableError
+                ? error.retryAfterMs
+                : 30_000;
+            if (totalWaitMs >= MAX_MODEL_WAIT_MS) {
               throw new Error(
-                `Gemini API keys remained rate limited for ${Math.ceil(totalWaitMs / 1000)}s.`
+                `${providerLabel} API keys remained rate limited for ${Math.ceil(
+                  totalWaitMs / 1000
+                )}s.`
               );
             }
 
-            const remainingBudget = Math.max(MAX_GEMINI_WAIT_MS - totalWaitMs, 0);
-            const waitMs = Math.min(error.retryAfterMs, Math.max(remainingBudget, 1_000));
+            const remainingBudget = Math.max(MAX_MODEL_WAIT_MS - totalWaitMs, 0);
+            const waitMs = Math.min(retryAfterMs, Math.max(remainingBudget, 1_000));
             totalWaitMs += waitMs;
 
             await emitLog(
               "warning",
-              `All Gemini API keys are rate limited; waiting ${Math.ceil(
+              `All ${providerLabel} API keys are rate limited (attempt ${attemptNumber}); waiting ${Math.ceil(
                 waitMs / 1000
               )}s before retrying.`
             );
             await delay(waitMs);
             continue;
           }
+          const acquireError = error instanceof Error ? error.message : String(error);
+          await emitLog(
+            "error",
+            `Failed to acquire ${providerLabel} model on attempt ${attemptNumber}: ${acquireError}`
+          );
           throw error;
         }
 
+        const handleLabel = (handle as { label?: string }).label ?? "unknown";
+        const handleMask = (handle as { mask?: string }).mask ?? "n/a";
+        await emitLog(
+          "info",
+          `Using ${providerLabel} key ${handleLabel} (${handleMask}) for attempt ${attemptNumber}.`
+        );
+
         attempts += 1;
+        agentStepCounter = 0;
         const agent = buildAgent(handle.model as unknown as LanguageModel);
         try {
           const result = await agent.generate({ prompt });
           const normalizedText = await coerceText(result);
-          reportGeminiSuccess(handle);
+          reportProviderSuccess(handle);
+
+          const finishReason = (result as { finishReason?: string }).finishReason ?? "unknown";
+          const resultSteps = (result as { steps?: unknown[] }).steps;
+          const stepCount = Array.isArray(resultSteps) ? resultSteps.length : agentStepCounter;
+          await emitLog(
+            "info",
+            `${providerLabel} ${handleLabel} (${handleMask}) succeeded on attempt ${attemptNumber} (finishReason=${finishReason}; steps=${stepCount}).`
+          );
+
           return { ...result, text: normalizedText };
         } catch (error) {
           lastError = error;
-          const outcome = reportGeminiFailure(handle, error);
+          const outcome = reportProviderFailure(handle, error);
+          const errorMessage = error instanceof Error ? error.message : String(error);
 
           if (outcome.retryable) {
             const retrySeconds = Math.ceil((outcome.retryAfterMs ?? 30_000) / 1000);
             await emitLog(
               "warning",
-              `Gemini ${handle.label} (${handle.mask}) hit a rate limit. Backing off this key for ${retrySeconds}s and rotating to the next key.`
+              `${providerLabel} ${handleLabel} (${handleMask}) attempt ${attemptNumber} hit a retryable error (${errorMessage}). Backing off ${retrySeconds}s before rotating to the next key.`
             );
             continue;
           }
 
+          await emitLog(
+            "error",
+            `${providerLabel} ${handleLabel} (${handleMask}) attempt ${attemptNumber} failed: ${errorMessage}`
+          );
           throw error;
         }
       }
 
       const message =
         lastError instanceof Error
-          ? `Failed to call Gemini after ${attempts} rotated attempts. Last error: ${lastError.message}`
-          : `Failed to call Gemini after ${attempts} rotated attempts.`;
+          ? `Failed to call ${providerLabel} after ${attempts} rotated attempts. Last error: ${lastError.message}`
+          : `Failed to call ${providerLabel} after ${attempts} rotated attempts.`;
 
       await emitLog("error", message);
       throw lastError instanceof Error ? lastError : new Error(message);
@@ -568,7 +729,7 @@ Repository URL: ${input.repoUrl ?? "(not supplied)"}
 Constraints: ${(input.constraints ?? []).join("; ") || "None"}
 Working branch: ${input.branch ?? "(not specified)"} (base: ${input.baseBranch ?? "main"})`;
 
-      const refinement = await generateWithGemini(refinePrompt);
+      const refinement = await generateWithProvider(refinePrompt);
       refinedBrief = (refinement.text ?? "").trim();
       if (refinedBrief) {
         await emitLog("info", `Refined Brief:\n\n${refinedBrief}`);
@@ -609,12 +770,18 @@ Previous passes (${attempt - 1}) finished without producing shippable artifacts.
 - Ship a concrete deliverable before exiting (code change, new file, or detailed written assessment committed to the repo).
 - Narrow scope, execute decisively, and validate results via repository evidence.`;
 
-      const { text, finishReason } = await generateWithGemini(prompt);
+      const { text, finishReason } = await generateWithProvider(prompt);
       latestSummary = (text ?? "").trim();
 
       const diff = await workspace.getDiff();
 
       if (diff.trim()) {
+        const diffBytes = Buffer.byteLength(diff, "utf8");
+        await emitLog(
+          "info",
+          `Agent produced git diff (${diffBytes} bytes). Emitting completion artifacts.`
+        );
+
         const artifactEvent = {
           id: randomUUID(),
           taskId: task.id,
@@ -649,9 +816,10 @@ Previous passes (${attempt - 1}) finished without producing shippable artifacts.
       }
 
       if (attempt < maxAgentPasses) {
+        const summaryPreview = formatPreview(latestSummary, 300) || "(empty)";
         await emitLog(
           "warning",
-          `Agent pass ${attempt} completed without tangible output; preparing pass ${attempt + 1} of ${maxAgentPasses}.`
+          `Agent pass ${attempt} completed without tangible output; preparing pass ${attempt + 1} of ${maxAgentPasses}. Latest summary: ${summaryPreview}`
         );
         await updateStatus(
           "planning",
@@ -671,6 +839,25 @@ Previous passes (${attempt - 1}) finished without producing shippable artifacts.
     await updateStatus("failed", "No tangible artifacts produced");
     throw new Error("No tangible output after agent passes.");
   } finally {
-    await workspace.cleanup();
+    try {
+      await emitLog("info", "Cleaning up workspace");
+    } catch (logError) {
+      const timestamp = new Date().toISOString();
+      console.warn(
+        `[${timestamp}] [worker:${workerId}] [task:${task.id}] Failed to emit cleanup log: ${
+          (logError as Error).message ?? logError
+        }`
+      );
+    }
+    try {
+      await workspace.cleanup();
+    } catch (cleanupError) {
+      const timestamp = new Date().toISOString();
+      console.warn(
+        `[${timestamp}] [worker:${workerId}] [task:${task.id}] Workspace cleanup failed: ${
+          (cleanupError as Error).message ?? cleanupError
+        }`
+      );
+    }
   }
 }

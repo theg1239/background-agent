@@ -1,6 +1,6 @@
 # Background Agent Worker
 
-This worker package spawns the autonomous coding agent that executes queued tasks. It prepares a disposable workspace, clones the target repository (if provided), and coordinates the Gemini-powered agent across multiple passes until a tangible artifact exists.
+This worker package spawns the autonomous coding agent that executes queued tasks. It prepares a disposable workspace, clones the target repository (if provided), and coordinates the AI-powered agent (Gemini or OpenRouter, selectable at runtime) across multiple passes until a tangible artifact exists.
 
 ## Execution Flow
 
@@ -12,7 +12,7 @@ This worker package spawns the autonomous coding agent that executes queued task
 
 ## Agentic Loop Expectations
 
-The worker wraps the Gemini model in an [`ai` `ToolLoopAgent`](https://ai-sdk.dev/docs/agents/tool-loop-agent).  
+The worker wraps the configured language model in an [`ai` `ToolLoopAgent`](https://ai-sdk.dev/docs/agents/tool-loop-agent).  
 Key behaviours enforced by `task-runner.ts`:
 
 - The agent receives explicit instructions that require it to maintain a plan, log progress, and justify completion.
@@ -30,4 +30,6 @@ These reports ensure that every task attempt leaves audit trails in git history,
 
 - Key settings live in `apps/worker/src/config.ts`.
 - Manual runs can use `pnpm --filter worker start` from the repository root.
-- The worker requires access to Gemini API keys—see `apps/worker/src/gemini.ts` for details.
+- Model provider defaults can be tuned through environment variables in `apps/worker/src/config.ts`.
+- Set `AI_PROVIDER` to choose the backend: `gemini` (default) requires `GOOGLE_GENERATIVE_AI_API_KEY` or `GOOGLE_GENERATIVE_AI_API_KEYS`, while `openrouter` requires `OPENROUTER_API_KEY` or `OPENROUTER_API_KEYS` (with an optional `OPENROUTER_BASE_URL`).
+- Optional overrides include `GEMINI_MODEL_NAME` (default `gemini-2.5-pro`), `OPENROUTER_MODEL_ID` (default `anthropic/claude-3.5-sonnet`), and `OPENROUTER_BASE_URL` (default `https://openrouter.ai/api/v1`).
