@@ -10,6 +10,16 @@ This worker package spawns the autonomous coding agent that executes queued task
 - Retry the agent up to the configured number of passes when no deliverable is produced.
 - Fall back to a written analysis report when the agent exits without modifying the repository.
 
+## Agentic Loop Expectations
+
+The worker wraps the Gemini model in an [`ai` `ToolLoopAgent`](https://ai-sdk.dev/docs/agents/tool-loop-agent).  
+Key behaviours enforced by `task-runner.ts`:
+
+- The agent receives explicit instructions that require it to maintain a plan, log progress, and justify completion.
+- `toolChoice` is set to `required`, so every step must call one of the workspace tools (`updatePlan`, `logProgress`, `setStatus`, `readFile`, `writeFile`, etc.). This prevents the model from short-circuiting with a plain-text answer.
+- Each tool invocation maps to task-store events, allowing the web dashboard to render plan updates, logs, diff previews, and status changes in real time.
+- When all passes finish without repository changes, the worker writes a fallback analysis report to `.background-agent/` and force-stages it so the Git diff always contains an auditable artifact.
+
 ## Fallback Analysis Reports
 
 If every agent pass completes without generating a diff, the worker now writes a Markdown report under `.background-agent/`. The report captures the final agent summary or, when none is available, a default message that directs operators to the task logs.

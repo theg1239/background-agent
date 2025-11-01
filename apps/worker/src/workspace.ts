@@ -60,6 +60,21 @@ export class Workspace {
     return { path: relative, bytes: Buffer.byteLength(contents, "utf8") };
   }
 
+  async stageFile(relative: string, options?: { force?: boolean }) {
+    ensureInsideWorkspace(this.root, path.join(this.root, relative));
+    const args = ["add"];
+    if (options?.force) {
+      args.push("--force");
+    }
+    args.push("--", relative);
+    try {
+      await this.git(args);
+      return { staged: true as const };
+    } catch (error) {
+      return { staged: false as const, error: error as Error };
+    }
+  }
+
   async listFiles(relative = ".", limit = 200) {
     const start = ensureInsideWorkspace(this.root, path.join(this.root, relative));
     const results: string[] = [];

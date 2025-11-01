@@ -102,6 +102,13 @@ export async function runTaskWithAgent({
       }
 
       const { bytes } = await workspace.writeFile(fallbackReportPath, reportContents);
+      const staged = await workspace.stageFile(fallbackReportPath, { force: true });
+      if (!staged.staged && staged.error) {
+        await emitLog(
+          "warning",
+          `Unable to stage fallback report ${fallbackReportPath}: ${staged.error.message}`
+        );
+      }
       await broadcastFileUpdate(fallbackReportPath, reportContents, previousContents, {
         byteLength: bytes
       });
