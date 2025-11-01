@@ -226,7 +226,7 @@ export async function runTaskWithAgent({
 - Use the provided tools to update the plan, log progress, change task status, and work with the repository.
 - Decompose work into small, verifiable steps and validate each change.
 - Use riggrep for fast code search and gitStatus to keep the repository state visible.
-- Treat the first phase as structured planning. Only move to implementation after the plan is reviewed or explicitly approved.
+- Start by creating a plan, then proceed with implementation in the same run. For simple tasks or empty repos, you can plan and implement immediately.
 - Never fabricate repository results; if you need external context, request human input via logs.
 - Do not mark the task complete until you have produced concrete artifacts (code changes, documentation updates, or a detailed security report) that justify completion.`,
         stopWhen: stepCountIs(config.agentStepLimit),
