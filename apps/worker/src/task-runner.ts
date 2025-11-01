@@ -226,7 +226,7 @@ export async function runTaskWithAgent({
 - Use the provided tools to update the plan, log progress, change task status, and work with the repository.
 - Decompose work into small, verifiable steps and validate each change.
 - Use riggrep for fast code search and gitStatus to keep the repository state visible.
-- Treat the first phase as structured planning. Only move to implementation after the plan is reviewed or explicitly approved.
+- Start by creating a plan, then proceed with implementation in the same run. You can plan and implement immediately for: small bug fixes, adding new files to empty repos, documentation updates, configuration changes, or analysis tasks.
 - Never fabricate repository results; if you need external context, request human input via logs.
 - Do not mark the task complete until you have produced concrete artifacts (code changes, documentation updates, or a detailed security report) that justify completion.`,
         stopWhen: stepCountIs(config.agentStepLimit),
@@ -636,6 +636,8 @@ Previous passes (${attempt - 1}) finished without producing shippable artifacts.
       throw new Error("Agent did not publish an execution plan for review.");
     }
 
+    // Agent completed all passes and updated the plan but produced no diff
+    // This is valid completion (e.g., analysis, planning, or empty repo work)
     const currentTaskSnapshot = await store.getTask(task.id);
     const planLines = currentTaskSnapshot?.plan?.map(
       (step, index) => `${index + 1}. [${step.status}] ${step.title}${step.summary ? ` — ${step.summary}` : ""}`
@@ -646,25 +648,25 @@ Previous passes (${attempt - 1}) finished without producing shippable artifacts.
 
     await emitLog(
       "info",
-      "Plan prepared; awaiting human approval before applying repository changes."
+      "Agent completed task successfully. Plan and analysis completed without code changes."
     );
-    await updateStatus("awaiting_approval", "Plan prepared; awaiting approval before applying changes");
+    await updateStatus("completed", "Task completed with plan and analysis");
 
-    const awaitingApprovalEvent = {
+    const completedEvent = {
       id: randomUUID(),
       taskId: task.id,
-      type: "task.awaiting_approval",
+      type: "task.completed",
       timestamp: Date.now(),
       payload: {
-        status: "awaiting_approval",
+        status: "completed",
         summary: effectiveSummary,
-        finishReason: "plan_only",
+        finishReason: "no_changes",
         workerId
       }
     } satisfies TaskEvent;
 
-    await store.appendEvent(task.id, awaitingApprovalEvent);
-    await notifyTaskEvent?.(task.id, awaitingApprovalEvent);
+    await store.appendEvent(task.id, completedEvent);
+    await notifyTaskEvent?.(task.id, completedEvent);
     await notifyTaskUpdate?.(task.id);
 
     return { success: true, summary: effectiveSummary } as const;
