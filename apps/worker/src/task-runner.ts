@@ -43,9 +43,7 @@ export async function runTaskWithAgent({
   notifyTaskEvent
 }: RunTaskOptions) {
   const workspace = await Workspace.prepare(task.id);
-  const safeTitle = slugify(task.title);
-  const fallbackReportPath = `.background-agent/${task.id}-${safeTitle}-analysis.md`;
-  const fallbackSummaryMessage = `Agent did not produce a usable summary while working on "${task.title}". Review task logs for additional context.`;
+  const fallbackSummaryMessage = `Plan ready for "${task.title}" — no repository changes yet. Review the plan and provide next steps when you're ready for implementation.`;
 
   const broadcastFileUpdate = async (
     path: string,
@@ -82,44 +80,6 @@ export async function runTaskWithAgent({
     } satisfies TaskEvent;
     await store.appendEvent(task.id, event);
     await notifyTaskEvent?.(task.id, event);
-  };
-
-  const writeFallbackAnalysis = async (rawSummary: string) => {
-    const summary = rawSummary.trim() || fallbackSummaryMessage;
-    const reportContents = `# Task Analysis\n\n${summary}\n`;
-
-    try {
-      let previousContents: string | null = null;
-      try {
-        previousContents = await workspace.readFile(fallbackReportPath);
-      } catch (error) {
-        if ((error as NodeJS.ErrnoException).code && (error as NodeJS.ErrnoException).code !== "ENOENT") {
-          await emitLog(
-            "warning",
-            `Failed to read existing fallback report ${fallbackReportPath}: ${(error as Error).message}`
-          );
-        }
-      }
-
-      const { bytes } = await workspace.writeFile(fallbackReportPath, reportContents);
-      const staged = await workspace.stageFile(fallbackReportPath, { force: true });
-      if (!staged.staged && staged.error) {
-        await emitLog(
-          "warning",
-          `Unable to stage fallback report ${fallbackReportPath}: ${staged.error.message}`
-        );
-      }
-      await broadcastFileUpdate(fallbackReportPath, reportContents, previousContents, {
-        byteLength: bytes
-      });
-      return { success: true as const, summary };
-    } catch (error) {
-      await emitLog(
-        "warning",
-        `Failed to write fallback analysis report: ${(error as Error).message}`
-      );
-      return { success: false as const, summary };
-    }
   };
 
   const planStepInputSchema = z.object({
@@ -256,6 +216,8 @@ export async function runTaskWithAgent({
       }
     }
 
+    let planWasUpdated = false;
+
     const buildAgent = (languageModel: LanguageModel) =>
       new ToolLoopAgent({
         model: languageModel,
@@ -264,6 +226,7 @@ export async function runTaskWithAgent({
 - Use the provided tools to update the plan, log progress, change task status, and work with the repository.
 - Decompose work into small, verifiable steps and validate each change.
 - Use riggrep for fast code search and gitStatus to keep the repository state visible.
+- Treat the first phase as structured planning. Only move to implementation after the plan is reviewed or explicitly approved.
 - Never fabricate repository results; if you need external context, request human input via logs.
 - Do not mark the task complete until you have produced concrete artifacts (code changes, documentation updates, or a detailed security report) that justify completion.`,
         stopWhen: stepCountIs(config.agentStepLimit),
@@ -286,6 +249,7 @@ export async function runTaskWithAgent({
                 }))
               );
 
+              planWasUpdated = true;
               const event = {
                 id: randomUUID(),
                 taskId: task.id,
@@ -590,7 +554,6 @@ Begin by emitting the initial execution plan described above.`;
       : basePrompt;
 
     let latestSummary = "";
-    let fallbackArtifactWritten = false;
     const maxAgentPasses = Math.max(1, config.agentMaxPasses);
     for (let attempt = 1; attempt <= maxAgentPasses; attempt += 1) {
       if (attempt > 1) {
@@ -615,21 +578,9 @@ Previous passes (${attempt - 1}) finished without producing shippable artifacts.
 - If implementation is unnecessary, capture findings in a written artifact that justifies completion.`;
 
       const { text, finishReason } = await generateWithGemini(prompt);
-      latestSummary = text ?? "Agent finished without summary";
+      latestSummary = (text ?? "").trim();
 
-      let diff = await workspace.getDiff();
-      if (!diff.trim() && !fallbackArtifactWritten) {
-        const { success, summary } = await writeFallbackAnalysis(latestSummary);
-        latestSummary = summary;
-        if (success) {
-          fallbackArtifactWritten = true;
-          await emitLog(
-            "info",
-            `Generated fallback analysis report at ${fallbackReportPath} after empty diff.`
-          );
-          diff = await workspace.getDiff();
-        }
-      }
+      const diff = await workspace.getDiff();
 
       if (diff.trim()) {
         const artifactEvent = {
@@ -677,48 +628,46 @@ Previous passes (${attempt - 1}) finished without producing shippable artifacts.
       }
     }
 
-    if (!fallbackArtifactWritten) {
-      const failureSummaryResult = await writeFallbackAnalysis(latestSummary);
-      if (failureSummaryResult.success) {
-        fallbackArtifactWritten = true;
-        latestSummary = failureSummaryResult.summary;
-        const diff = await workspace.getDiff();
-        if (diff.trim()) {
-          const artifactEvent = {
-            id: randomUUID(),
-            taskId: task.id,
-            type: "task.artifact_generated",
-            timestamp: Date.now(),
-            payload: {
-              artifactType: "git_diff",
-              diff,
-              workerId
-            }
-          } satisfies TaskEvent;
-          await store.appendEvent(task.id, artifactEvent);
-          await notifyTaskEvent?.(task.id, artifactEvent);
-
-          const completedEvent = {
-            id: randomUUID(),
-            taskId: task.id,
-            type: "task.completed",
-            timestamp: Date.now(),
-            payload: {
-              status: "completed",
-              summary: latestSummary,
-              workerId,
-              finishReason: "fallback_report"
-            }
-          } satisfies TaskEvent;
-          await store.appendEvent(task.id, completedEvent);
-          await notifyTaskEvent?.(task.id, completedEvent);
-          await notifyTaskUpdate?.(task.id);
-          return { success: true, summary: latestSummary } as const;
-        }
-      }
+    if (!planWasUpdated) {
+      await emitLog(
+        "error",
+        "Agent loop ended without publishing a plan; treating run as a failure."
+      );
+      throw new Error("Agent did not publish an execution plan for review.");
     }
 
-    throw new Error("Agent finished without producing workspace changes.");
+    const currentTaskSnapshot = await store.getTask(task.id);
+    const planLines = currentTaskSnapshot?.plan?.map(
+      (step, index) => `${index + 1}. [${step.status}] ${step.title}${step.summary ? ` — ${step.summary}` : ""}`
+    );
+    const planSummary = planLines && planLines.length > 0 ? `Proposed Plan:\n${planLines.join("\n")}` : "";
+    const effectiveSummary =
+      latestSummary || planSummary || fallbackSummaryMessage;
+
+    await emitLog(
+      "info",
+      "Plan prepared; awaiting human approval before applying repository changes."
+    );
+    await updateStatus("awaiting_approval", "Plan prepared; awaiting approval before applying changes");
+
+    const awaitingApprovalEvent = {
+      id: randomUUID(),
+      taskId: task.id,
+      type: "task.awaiting_approval",
+      timestamp: Date.now(),
+      payload: {
+        status: "awaiting_approval",
+        summary: effectiveSummary,
+        finishReason: "plan_only",
+        workerId
+      }
+    } satisfies TaskEvent;
+
+    await store.appendEvent(task.id, awaitingApprovalEvent);
+    await notifyTaskEvent?.(task.id, awaitingApprovalEvent);
+    await notifyTaskUpdate?.(task.id);
+
+    return { success: true, summary: effectiveSummary } as const;
   } finally {
     await workspace.cleanup();
   }

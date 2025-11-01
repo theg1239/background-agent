@@ -9,7 +9,7 @@ import { useTaskIndex } from "../hooks/use-task-index";
 import { DiffArtifactCard } from "./diff-artifact-card";
 import { LiveFileDiffViewer, type LiveFileUpdate } from "./live-file-diff-viewer";
 import type { GitHubAuthState } from "../lib/server/github-auth";
-import { createTaskAction, recordFollowUpAction } from "../app/actions/task-actions";
+import { createTaskAction, recordFollowUpAction, resolveApprovalAction } from "../app/actions/task-actions";
 
 interface ChatInterfaceProps {
   initialTasks: Task[];
@@ -76,6 +76,9 @@ export function ChatInterface({ initialTasks, initialGitHubAuth }: ChatInterface
   const [followUpText, setFollowUpText] = useState("");
   const [followUpError, setFollowUpError] = useState<string | null>(null);
   const [followUpStatus, setFollowUpStatus] = useState<string | null>(null);
+  const [approvalComment, setApprovalComment] = useState("");
+  const [approvalError, setApprovalError] = useState<string | null>(null);
+  const [approvalStatus, setApprovalStatus] = useState<string | null>(null);
   const [focusedEventId, setFocusedEventId] = useState<string | undefined>(undefined);
   const [hasActivatedFullUI, setHasActivatedFullUI] = useState(() =>
     initialTasks.some((task) => ACTIVE_TASK_STATUS_SET.has(task.status))
@@ -86,6 +89,7 @@ export function ChatInterface({ initialTasks, initialGitHubAuth }: ChatInterface
   const [showQuickRepoField, setShowQuickRepoField] = useState(false);
   const [isFollowUpPending, startFollowUp] = useTransition();
   const [isQuickTaskPending, startQuickTask] = useTransition();
+  const [isApprovalPending, startApproval] = useTransition();
   const [isHistoryOpen, setIsHistoryOpen] = useState(false);
   const { tasks, upsertTask, replaceTask, removeTask } = useTaskIndex(initialTasks);
   const optimisticIds = useRef(new Set<string>());
@@ -431,6 +435,43 @@ export function ChatInterface({ initialTasks, initialGitHubAuth }: ChatInterface
     []
   );
 
+  const handleApprovalDecision = useCallback(
+    (decision: "approve" | "changes_requested") => {
+      if (!resolvedTask || resolvedTask.status !== "awaiting_approval") return;
+      if (isApprovalPending) return;
+
+      const trimmedComment = approvalComment.trim();
+      if (decision === "changes_requested" && trimmedComment.length < 3) {
+        setApprovalError("Share feedback (minimum 3 characters) before requesting changes.");
+        return;
+      }
+
+      setApprovalError(null);
+      startApproval(async () => {
+        try {
+          const result = await resolveApprovalAction({
+            taskId: resolvedTask.id,
+            decision,
+            comment: trimmedComment || undefined
+          });
+          if (!result.ok) {
+            setApprovalError(result.error ?? "Failed to submit approval.");
+            return;
+          }
+          setApprovalStatus(
+            result.approved
+              ? "Approval recorded. Agent will continue shortly."
+              : "Change request sent. Agent will revisit the plan."
+          );
+          setApprovalComment("");
+        } catch (error) {
+          setApprovalError((error as Error).message ?? "Failed to submit approval.");
+        }
+      });
+    },
+    [approvalComment, isApprovalPending, resolvedTask, startApproval]
+  );
+
   const handleGitHubAuthChange = useCallback((state: GitHubAuthState) => {
     setGitHubAuth(state);
   }, []);
@@ -460,6 +501,25 @@ export function ChatInterface({ initialTasks, initialGitHubAuth }: ChatInterface
     return () => clearTimeout(timeout);
   }, [followUpStatus]);
 
+  useEffect(() => {
+    if (!approvalStatus) return;
+    const timeout = setTimeout(() => setApprovalStatus(null), 3_000);
+    return () => clearTimeout(timeout);
+  }, [approvalStatus]);
+
+  useEffect(() => {
+    if (!approvalError) return;
+    const timeout = setTimeout(() => setApprovalError(null), 4_500);
+    return () => clearTimeout(timeout);
+  }, [approvalError]);
+
+  useEffect(() => {
+    if (resolvedTask?.status === "awaiting_approval") return;
+    setApprovalComment("");
+    setApprovalError(null);
+    setApprovalStatus(null);
+  }, [resolvedTask?.status]);
+
   const ConversationPanel = ({ highlightEventId }: { highlightEventId?: string }) => {
     const highlightRef = useRef<HTMLDivElement | null>(null);
 
@@ -480,6 +540,8 @@ export function ChatInterface({ initialTasks, initialGitHubAuth }: ChatInterface
       }
     }, []);
 
+    const awaitingApproval = resolvedTask?.status === "awaiting_approval";
+
     return (
       <div className="flex h-full min-h-0 flex-1 flex-col overflow-hidden rounded-3xl border border-neutral-800 bg-neutral-950/85">
         <div className="flex flex-shrink-0 items-center justify-between border-b border-neutral-800 px-5 py-4">
@@ -496,6 +558,82 @@ export function ChatInterface({ initialTasks, initialGitHubAuth }: ChatInterface
         className="scrollbar flex-1 overflow-y-auto px-5 py-5"
       >
         <div className="flex flex-col gap-3">
+          {awaitingApproval ? (
+            <div className="rounded-2xl border border-emerald-400/40 bg-emerald-500/10 p-5 text-neutral-100 shadow-sm">
+              <div className="flex flex-wrap items-start justify-between gap-3">
+                <div>
+                  <p className="text-sm font-semibold text-white">Plan ready for approval</p>
+                  <p className="text-xs text-neutral-300">
+                    Review the proposed steps and choose how the agent should proceed.
+                  </p>
+                </div>
+                <span className="rounded-full border border-emerald-400/60 px-3 py-1 text-[10px] uppercase tracking-[0.3em] text-emerald-200">
+                  Awaiting approval
+                </span>
+              </div>
+              {resolvedTask?.plan?.length ? (
+                <ol className="mt-4 space-y-2 text-sm text-neutral-100">
+                  {resolvedTask.plan.map((step) => (
+                    <li
+                      key={step.id}
+                      className="rounded-xl border border-emerald-400/20 bg-black/30 px-3 py-2"
+                    >
+                      <div className="flex flex-wrap items-start justify-between gap-3">
+                        <span className="font-medium text-white">{step.title}</span>
+                        <span className="text-[10px] uppercase tracking-[0.25em] text-neutral-400">
+                          {humanizeStatus(step.status)}
+                        </span>
+                      </div>
+                      {step.summary ? (
+                        <p className="mt-1 text-xs text-neutral-300">{step.summary}</p>
+                      ) : null}
+                    </li>
+                  ))}
+                </ol>
+              ) : (
+                <p className="mt-3 text-xs text-neutral-300">
+                  No detailed steps were provided. Add guidance or approve to continue.
+                </p>
+              )}
+              <div className="mt-4 space-y-3">
+                <label className="block text-xs uppercase tracking-[0.25em] text-neutral-400">
+                  Feedback (optional)
+                  <textarea
+                    value={approvalComment}
+                    onChange={(event) => setApprovalComment(event.target.value)}
+                    placeholder="Share validation notes or requested changes"
+                    rows={3}
+                    disabled={isApprovalPending}
+                    className="mt-2 w-full rounded-xl border border-neutral-700 bg-black/40 px-3 py-2 text-sm text-neutral-100 placeholder:text-neutral-500 focus:border-emerald-400 focus:outline-none focus:ring-1 focus:ring-emerald-400 disabled:cursor-not-allowed disabled:opacity-60"
+                  />
+                </label>
+                {approvalError ? (
+                  <p className="text-xs text-red-400">{approvalError}</p>
+                ) : null}
+                {approvalStatus ? (
+                  <p className="text-xs text-emerald-300">{approvalStatus}</p>
+                ) : null}
+                <div className="flex flex-wrap items-center gap-3">
+                  <button
+                    type="button"
+                    onClick={() => handleApprovalDecision("approve")}
+                    disabled={isApprovalPending}
+                    className="inline-flex items-center justify-center rounded-full border border-emerald-400 bg-emerald-500/20 px-4 py-2 text-sm font-semibold text-emerald-100 transition hover:border-emerald-300 hover:text-white disabled:cursor-not-allowed disabled:opacity-60"
+                  >
+                    {isApprovalPending ? "Submitting..." : "Approve plan"}
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => handleApprovalDecision("changes_requested")}
+                    disabled={isApprovalPending}
+                    className="inline-flex items-center justify-center rounded-full border border-amber-400 bg-amber-500/10 px-4 py-2 text-sm font-semibold text-amber-100 transition hover:border-amber-300 hover:text-white disabled:cursor-not-allowed disabled:opacity-60"
+                  >
+                    {isApprovalPending ? "Submitting..." : "Request changes"}
+                  </button>
+                </div>
+              </div>
+            </div>
+          ) : null}
           {displayedEvents.map((event) => {
             const isAgent = event.tone === "agent";
             const isSystem = event.tone === "system";
@@ -1063,6 +1201,35 @@ function formatEvent(event: TaskEvent): DisplayEvent {
         label: "Task failed",
         body: event.payload?.error ?? "The agent reported a failure.",
         tone: "alert"
+      };
+    }
+    case "task.awaiting_approval": {
+      const summary =
+        typeof event.payload?.summary === "string"
+          ? event.payload.summary
+          : "Plan awaiting review before execution continues.";
+      return {
+        ...base,
+        label: "Awaiting approval",
+        body: summary,
+        tone: "system"
+      };
+    }
+    case "task.approval_resolved": {
+      const decision = event.payload?.decision;
+      const approved = decision === "approve" || event.payload?.approved === true;
+      const comment =
+        typeof event.payload?.comment === "string" && event.payload.comment.trim()
+          ? event.payload.comment.trim()
+          : undefined;
+      return {
+        ...base,
+        label: approved ? "Plan approved" : "Changes requested",
+        body: approved
+          ? "Approval recorded. Agent resuming execution."
+          : "Changes requested. Agent will update the plan.",
+        detail: comment,
+        tone: approved ? "agent" : "alert"
       };
     }
     case "task.artifact_generated": {

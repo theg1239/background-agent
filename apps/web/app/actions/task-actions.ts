@@ -374,6 +374,85 @@ export async function recordFollowUpAction(input: z.infer<typeof FollowUpSchema>
   return { ok: true, restarted: false } as const;
 }
 
+const ResolveApprovalSchema = z.object({
+  taskId: z.string().min(1),
+  decision: z.enum(["approve", "changes_requested"]),
+  comment: z.string().optional()
+});
+
+export async function resolveApprovalAction(input: z.infer<typeof ResolveApprovalSchema>) {
+  const parsed = ResolveApprovalSchema.safeParse(input);
+  if (!parsed.success) {
+    const message = parsed.error.errors[0]?.message ?? "Invalid approval request";
+    return { ok: false, error: message } as const;
+  }
+
+  const { taskId, decision } = parsed.data;
+  const comment = parsed.data.comment?.trim();
+
+  const sessionId = await requireSessionId();
+
+  const task = await taskStore.getTask(taskId);
+  if (!task) {
+    return { ok: false, error: "Task not found." } as const;
+  }
+
+  if (task.status !== "awaiting_approval") {
+    return { ok: false, error: "Task is not awaiting approval." } as const;
+  }
+
+  if (decision === "changes_requested" && (!comment || comment.length < 3)) {
+    return {
+      ok: false,
+      error: "Provide feedback (minimum 3 characters) when requesting changes."
+    } as const;
+  }
+
+  const resolvedAt = Date.now();
+  const approvalEvent: TaskEvent = {
+    id: randomUUID(),
+    taskId,
+    type: "task.approval_resolved",
+    timestamp: resolvedAt,
+    payload: {
+      decision,
+      approved: decision === "approve",
+      comment: comment ?? undefined,
+      resolvedBy: sessionId,
+      resolvedAt
+    }
+  };
+
+  await taskStore.appendEvent(taskId, approvalEvent);
+
+  if (decision === "changes_requested" && comment) {
+    const followUp: TaskEvent = {
+      id: randomUUID(),
+      taskId,
+      type: "task.follow_up",
+      timestamp: Date.now(),
+      payload: {
+        message: comment,
+        origin: "approval_feedback"
+      }
+    };
+    await taskStore.appendEvent(taskId, followUp);
+  }
+
+  const restartPayload = {
+    reason: decision === "approve" ? "approval_granted" : "changes_requested",
+    resolvedBy: sessionId,
+    decision
+  };
+
+  await enqueueTaskExecution(task, restartPayload);
+
+  return {
+    ok: true,
+    approved: decision === "approve"
+  } as const;
+}
+
 type GitTreeEntry = {
   path?: string;
   mode?: string;
