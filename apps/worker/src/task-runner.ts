@@ -636,6 +636,8 @@ Previous passes (${attempt - 1}) finished without producing shippable artifacts.
       throw new Error("Agent did not publish an execution plan for review.");
     }
 
+    // Agent completed all passes and updated the plan but produced no diff
+    // This is valid completion (e.g., analysis, planning, or empty repo work)
     const currentTaskSnapshot = await store.getTask(task.id);
     const planLines = currentTaskSnapshot?.plan?.map(
       (step, index) => `${index + 1}. [${step.status}] ${step.title}${step.summary ? ` — ${step.summary}` : ""}`
@@ -646,25 +648,25 @@ Previous passes (${attempt - 1}) finished without producing shippable artifacts.
 
     await emitLog(
       "info",
-      "Plan prepared; awaiting human approval before applying repository changes."
+      "Agent completed execution. No code changes were produced, but plan and analysis are available."
     );
-    await updateStatus("awaiting_approval", "Plan prepared; awaiting approval before applying changes");
+    await updateStatus("completed", "Task completed with plan and analysis");
 
-    const awaitingApprovalEvent = {
+    const completedEvent = {
       id: randomUUID(),
       taskId: task.id,
-      type: "task.awaiting_approval",
+      type: "task.completed",
       timestamp: Date.now(),
       payload: {
-        status: "awaiting_approval",
+        status: "completed",
         summary: effectiveSummary,
-        finishReason: "plan_only",
+        finishReason: "no_changes",
         workerId
       }
     } satisfies TaskEvent;
 
-    await store.appendEvent(task.id, awaitingApprovalEvent);
-    await notifyTaskEvent?.(task.id, awaitingApprovalEvent);
+    await store.appendEvent(task.id, completedEvent);
+    await notifyTaskEvent?.(task.id, completedEvent);
     await notifyTaskUpdate?.(task.id);
 
     return { success: true, summary: effectiveSummary } as const;
