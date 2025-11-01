@@ -115,22 +115,24 @@ export async function runTaskWithAgent({
     }
   };
 
-  const normalizeSteps = (
-    steps: Array<{
-      id?: string;
-      title: string;
-      summary?: string;
-      status?: TaskPlanStep["status"];
-    }>
-  ): TaskPlanStep[] => {
+  const planStepInputSchema = z.object({
+    id: z.string().optional(),
+    title: z.string(),
+    summary: z.string().optional(),
+    status: z.enum(["pending", "in_progress", "completed", "failed"]).optional()
+  });
+  type PlanStepInput = z.infer<typeof planStepInputSchema>;
+
+  const normalizeSteps = (steps: PlanStepInput[]): TaskPlanStep[] => {
     return steps.map((step, index) => {
       const id = step.id ?? `${task.id}-step-${index + 1}-${randomUUID().slice(0, 8)}`;
+      const status: TaskPlanStep["status"] = step.status ?? "pending";
       return {
         id,
         title: step.title,
         summary: step.summary,
-        status: step.status ?? "pending"
-      } satisfies TaskPlanStep;
+        status
+      };
     });
   };
 
@@ -261,40 +263,36 @@ export async function runTaskWithAgent({
           updatePlan: tool({
             description: "Update the execution plan with the latest steps and statuses.",
             inputSchema: z.object({
-              steps: z.array(
-                z.object({
-                id: z.string().optional(),
-                title: z.string(),
-                summary: z.string().optional(),
-                status: z.enum(["pending", "in_progress", "completed", "failed"]).optional()
-              })
-            ),
-            note: z.string().optional()
+              steps: z
+                .array(planStepInputSchema)
+                .min(1, "Provide at least one plan step."),
+              note: z.string().optional()
+            }),
+            execute: async ({ steps, note }) => {
+              const normalized = normalizeSteps(
+                steps.map((step) => ({
+                  id: step.id,
+                  title: step.title,
+                  summary: step.summary,
+                  status: step.status ?? "pending"
+                }))
+              );
+
+              const event = {
+                id: randomUUID(),
+                taskId: task.id,
+                type: "plan.updated",
+                timestamp: Date.now(),
+                payload: {
+                  plan: normalized,
+                  note
+                }
+              } satisfies TaskEvent;
+              await store.appendEvent(task.id, event);
+              await notifyTaskEvent?.(task.id, event);
+              return { acknowledged: true };
+            }
           }),
-          execute: async ({ steps, note }) => {
-            const normalized = normalizeSteps(
-              steps.map((step) => ({
-                id: step.id,
-                title: step.title,
-                summary: step.summary,
-                status: step.status ?? "pending"
-              }))
-            );
-        const event = {
-          id: randomUUID(),
-          taskId: task.id,
-          type: "plan.updated",
-          timestamp: Date.now(),
-          payload: {
-            plan: normalized,
-            note
-          }
-        } satisfies TaskEvent;
-        await store.appendEvent(task.id, event);
-        await notifyTaskEvent?.(task.id, event);
-            return { acknowledged: true };
-          }
-        }),
         logProgress: tool({
           description: "Log progress messages for the human operator.",
           inputSchema: z.object({
