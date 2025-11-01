@@ -226,7 +226,7 @@ export async function runTaskWithAgent({
 - Use the provided tools to update the plan, log progress, change task status, and work with the repository.
 - Decompose work into small, verifiable steps and validate each change.
 - Use riggrep for fast code search and gitStatus to keep the repository state visible.
-- Start by creating a plan, then proceed with implementation in the same run. For simple tasks or empty repos, you can plan and implement immediately.
+- Start by creating a plan, then proceed with implementation in the same run. You can plan and implement immediately for: small bug fixes, adding new files to empty repos, documentation updates, configuration changes, or analysis tasks.
 - Never fabricate repository results; if you need external context, request human input via logs.
 - Do not mark the task complete until you have produced concrete artifacts (code changes, documentation updates, or a detailed security report) that justify completion.`,
         stopWhen: stepCountIs(config.agentStepLimit),
@@ -648,7 +648,7 @@ Previous passes (${attempt - 1}) finished without producing shippable artifacts.
 
     await emitLog(
       "info",
-      "Agent completed execution. No code changes were produced, but plan and analysis are available."
+      "Agent completed task successfully. Plan and analysis completed without code changes."
     );
     await updateStatus("completed", "Task completed with plan and analysis");
 
