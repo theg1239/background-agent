@@ -51,7 +51,7 @@ COPY --from=builder /app/packages/shared/dist ./packages/shared/dist
 COPY apps/worker/package.json ./apps/worker/
 
 # Install production dependencies only
-RUN --mount=type=cache,id=pnpm,target=/pnpm/store pnpm install --frozen-lockfile --prod --ignore-scripts
+RUN --mount=type=cache,id=pnpm,target=/pnpm/store pnpm install --frozen-lockfile --prod
 
 # Copy built worker application
 COPY --from=builder /app/apps/worker/dist ./apps/worker/dist

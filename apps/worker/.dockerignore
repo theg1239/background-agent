@@ -10,4 +10,3 @@ yarn-error.log*
 pnpm-debug.log*
 .git
 .gitignore
-README.md
