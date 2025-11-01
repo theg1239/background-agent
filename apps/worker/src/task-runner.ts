@@ -108,7 +108,10 @@ export async function runTaskWithAgent({
     const prefix = `[${timestamp}] [worker:${workerId}] [task:${task.id}]`;
     const consoleMethod =
       level === "error" ? console.error : level === "warning" ? console.warn : console.log;
-    consoleMethod(`${prefix} ${message}`);
+    const isProduction = process.env.NODE_ENV === "production";
+    if (!(isProduction && level === "info")) {
+      consoleMethod(`${prefix} ${message}`);
+    }
 
     const event = {
       id: randomUUID(),

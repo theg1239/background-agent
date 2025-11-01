@@ -41,6 +41,30 @@ const log = (level: LogLevel, message: string, context?: Record<string, unknown>
     }
   }
   const line = `[${timestamp}] [worker:${workerId}] ${message}${contextSuffix}`;
+
+  const levelOrder: Record<LogLevel, number> = {
+    debug: 10,
+    info: 20,
+    warn: 30,
+    error: 40
+  };
+
+  const rawConfiguredLevel = process.env.LOG_LEVEL
+    ? process.env.LOG_LEVEL.trim().toLowerCase()
+    : undefined;
+  const configuredLevel = rawConfiguredLevel === "debug" ||
+    rawConfiguredLevel === "info" ||
+    rawConfiguredLevel === "warn" ||
+    rawConfiguredLevel === "error"
+      ? (rawConfiguredLevel as LogLevel)
+      : undefined;
+  const defaultLevel: LogLevel = process.env.NODE_ENV === "production" ? "warn" : "info";
+  const threshold = levelOrder[configuredLevel ?? defaultLevel] ?? levelOrder[defaultLevel];
+
+  if (levelOrder[level] < threshold) {
+    return;
+  }
+
   const method =
     level === "error"
       ? console.error

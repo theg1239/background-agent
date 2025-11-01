@@ -521,6 +521,95 @@ export function ChatInterface({ initialTasks, initialGitHubAuth }: ChatInterface
     setApprovalStatus(null);
   }, [resolvedTask?.status]);
 
+  const ApprovalPanel = ({ condensed = false }: { condensed?: boolean }) => {
+    if (!resolvedTask || resolvedTask.status !== "awaiting_approval") return null;
+
+    const plan = Array.isArray(resolvedTask.plan) ? resolvedTask.plan : [];
+
+    const containerClasses = clsx(
+      "rounded-2xl border border-emerald-400/40 bg-emerald-500/10 text-neutral-100 shadow-sm",
+      condensed ? "p-4" : "p-5"
+    );
+
+    return (
+      <div className={containerClasses}>
+        <div className="flex flex-wrap items-start justify-between gap-3">
+          <div>
+            <p className="text-sm font-semibold text-white">Plan ready for approval</p>
+            <p className="text-xs text-neutral-300">
+              Review the proposed steps and choose how the agent should proceed.
+            </p>
+          </div>
+          <span className="rounded-full border border-emerald-400/60 px-3 py-1 text-[10px] uppercase tracking-[0.3em] text-emerald-200">
+            Awaiting approval
+          </span>
+        </div>
+        {plan.length ? (
+          <ol className="mt-4 space-y-2 text-sm text-neutral-100">
+            {plan.map((step) => (
+              <li
+                key={step.id}
+                className="rounded-xl border border-emerald-400/20 bg-black/30 px-3 py-2"
+              >
+                <div className="flex flex-wrap items-start justify-between gap-3">
+                  <span className="font-medium text-white">{step.title}</span>
+                  {step.status ? (
+                    <span className="text-[10px] uppercase tracking-[0.25em] text-neutral-400">
+                      {humanizeStatus(step.status)}
+                    </span>
+                  ) : null}
+                </div>
+                {step.summary ? (
+                  <MarkdownContent
+                    content={step.summary}
+                    className="mt-1 text-xs text-neutral-300 [&>p]:m-0"
+                  />
+                ) : null}
+              </li>
+            ))}
+          </ol>
+        ) : (
+          <p className="mt-3 text-xs text-neutral-300">
+            No detailed steps were provided. Add guidance or approve to continue.
+          </p>
+        )}
+        <div className="mt-4 space-y-3">
+          <label className="block text-xs uppercase tracking-[0.25em] text-neutral-400">
+            Feedback (optional)
+            <textarea
+              value={approvalComment}
+              onChange={(event) => setApprovalComment(event.target.value)}
+              placeholder="Share validation notes or requested changes"
+              rows={3}
+              disabled={isApprovalPending}
+              className="mt-2 w-full rounded-xl border border-neutral-700 bg-black/40 px-3 py-2 text-sm text-neutral-100 placeholder:text-neutral-500 focus:border-emerald-400 focus:outline-none focus:ring-1 focus:ring-emerald-400 disabled:cursor-not-allowed disabled:opacity-60"
+            />
+          </label>
+          {approvalError ? <p className="text-xs text-red-400">{approvalError}</p> : null}
+          {approvalStatus ? <p className="text-xs text-emerald-300">{approvalStatus}</p> : null}
+          <div className="flex flex-wrap items-center gap-3">
+            <button
+              type="button"
+              onClick={() => handleApprovalDecision("approve")}
+              disabled={isApprovalPending}
+              className="inline-flex items-center justify-center rounded-full border border-emerald-400 bg-emerald-500/20 px-4 py-2 text-sm font-semibold text-emerald-100 transition hover:border-emerald-300 hover:text-white disabled:cursor-not-allowed disabled:opacity-60"
+            >
+              {isApprovalPending ? "Submitting..." : "Approve plan"}
+            </button>
+            <button
+              type="button"
+              onClick={() => handleApprovalDecision("changes_requested")}
+              disabled={isApprovalPending}
+              className="inline-flex items-center justify-center rounded-full border border-amber-400 bg-amber-500/10 px-4 py-2 text-sm font-semibold text-amber-100 transition hover:border-amber-300 hover:text-white disabled:cursor-not-allowed disabled:opacity-60"
+            >
+              {isApprovalPending ? "Submitting..." : "Request changes"}
+            </button>
+          </div>
+        </div>
+      </div>
+    );
+  };
+
   const ConversationPanel = ({ highlightEventId }: { highlightEventId?: string }) => {
     const highlightRef = useRef<HTMLDivElement | null>(null);
 
@@ -541,8 +630,6 @@ export function ChatInterface({ initialTasks, initialGitHubAuth }: ChatInterface
       }
     }, []);
 
-    const awaitingApproval = resolvedTask?.status === "awaiting_approval";
-
     return (
       <div className="flex h-full min-h-0 flex-1 flex-col overflow-hidden rounded-3xl border border-neutral-800 bg-neutral-950/85">
         <div className="flex flex-shrink-0 items-center justify-between border-b border-neutral-800 px-5 py-4">
@@ -559,82 +646,7 @@ export function ChatInterface({ initialTasks, initialGitHubAuth }: ChatInterface
         className="scrollbar flex-1 overflow-y-auto px-5 py-5"
       >
         <div className="flex flex-col gap-3">
-          {awaitingApproval ? (
-            <div className="rounded-2xl border border-emerald-400/40 bg-emerald-500/10 p-5 text-neutral-100 shadow-sm">
-              <div className="flex flex-wrap items-start justify-between gap-3">
-                <div>
-                  <p className="text-sm font-semibold text-white">Plan ready for approval</p>
-                  <p className="text-xs text-neutral-300">
-                    Review the proposed steps and choose how the agent should proceed.
-                  </p>
-                </div>
-                <span className="rounded-full border border-emerald-400/60 px-3 py-1 text-[10px] uppercase tracking-[0.3em] text-emerald-200">
-                  Awaiting approval
-                </span>
-              </div>
-              {resolvedTask?.plan?.length ? (
-                <ol className="mt-4 space-y-2 text-sm text-neutral-100">
-                  {resolvedTask.plan.map((step) => (
-                    <li
-                      key={step.id}
-                      className="rounded-xl border border-emerald-400/20 bg-black/30 px-3 py-2"
-                    >
-                      <div className="flex flex-wrap items-start justify-between gap-3">
-                        <span className="font-medium text-white">{step.title}</span>
-                        <span className="text-[10px] uppercase tracking-[0.25em] text-neutral-400">
-                          {humanizeStatus(step.status)}
-                        </span>
-                      </div>
-                      {step.summary ? (
-                        <p className="mt-1 text-xs text-neutral-300">{step.summary}</p>
-                      ) : null}
-                    </li>
-                  ))}
-                </ol>
-              ) : (
-                <p className="mt-3 text-xs text-neutral-300">
-                  No detailed steps were provided. Add guidance or approve to continue.
-                </p>
-              )}
-              <div className="mt-4 space-y-3">
-                <label className="block text-xs uppercase tracking-[0.25em] text-neutral-400">
-                  Feedback (optional)
-                  <textarea
-                    value={approvalComment}
-                    onChange={(event) => setApprovalComment(event.target.value)}
-                    placeholder="Share validation notes or requested changes"
-                    rows={3}
-                    disabled={isApprovalPending}
-                    className="mt-2 w-full rounded-xl border border-neutral-700 bg-black/40 px-3 py-2 text-sm text-neutral-100 placeholder:text-neutral-500 focus:border-emerald-400 focus:outline-none focus:ring-1 focus:ring-emerald-400 disabled:cursor-not-allowed disabled:opacity-60"
-                  />
-                </label>
-                {approvalError ? (
-                  <p className="text-xs text-red-400">{approvalError}</p>
-                ) : null}
-                {approvalStatus ? (
-                  <p className="text-xs text-emerald-300">{approvalStatus}</p>
-                ) : null}
-                <div className="flex flex-wrap items-center gap-3">
-                  <button
-                    type="button"
-                    onClick={() => handleApprovalDecision("approve")}
-                    disabled={isApprovalPending}
-                    className="inline-flex items-center justify-center rounded-full border border-emerald-400 bg-emerald-500/20 px-4 py-2 text-sm font-semibold text-emerald-100 transition hover:border-emerald-300 hover:text-white disabled:cursor-not-allowed disabled:opacity-60"
-                  >
-                    {isApprovalPending ? "Submitting..." : "Approve plan"}
-                  </button>
-                  <button
-                    type="button"
-                    onClick={() => handleApprovalDecision("changes_requested")}
-                    disabled={isApprovalPending}
-                    className="inline-flex items-center justify-center rounded-full border border-amber-400 bg-amber-500/10 px-4 py-2 text-sm font-semibold text-amber-100 transition hover:border-amber-300 hover:text-white disabled:cursor-not-allowed disabled:opacity-60"
-                  >
-                    {isApprovalPending ? "Submitting..." : "Request changes"}
-                  </button>
-                </div>
-              </div>
-            </div>
-          ) : null}
+          <ApprovalPanel />
           {displayedEvents.map((event) => {
             const isAgent = event.tone === "agent";
             const isSystem = event.tone === "system";
@@ -928,7 +940,10 @@ export function ChatInterface({ initialTasks, initialGitHubAuth }: ChatInterface
           </section>
 
           <div className="flex min-h-0 flex-1 overflow-hidden">
-            <div className="hidden min-h-0 flex-1 overflow-hidden rounded-3xl border border-neutral-800 bg-neutral-950/85 xl:flex">
+            <div className="hidden min-h-0 flex-1 flex-col gap-4 overflow-hidden xl:flex">
+              <div className="hidden xl:block">
+                <ApprovalPanel condensed />
+              </div>
               <LiveFileDiffViewer
                 updates={liveFileUpdates}
                 className="flex-1"
